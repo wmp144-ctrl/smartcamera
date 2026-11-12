@@ -1,0 +1,38 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# --- local configuration / secrets ---------------------------------------
+.env
+.env.local
+backend/.env
+backend/.env.local
+!backend/.env.example
+
+# --- runtime data (database, stored images, model weights, logs) ---------
+backend/data/
+offline/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# --- frontend -------------------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+.vite/
+
+# --- editors / OS ---------------------------------------------------------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# --- editor tooling metadata ---------------------------------------------
+.freebuff/

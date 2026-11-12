@@ -1,0 +1,225 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------ */
+/* Design tokens                                                       */
+/* ------------------------------------------------------------------ */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-brand: var(--brand);
+  --color-brand-2: var(--brand-2);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+
+  --font-sans: "Vazirmatn", "IRANSansX", "IRANSans", "Segoe UI", Tahoma, "Noto Sans Arabic",
+    system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+:root {
+  --bg: #060b16;
+  --surface: #0c1424;
+  --surface-2: #121c30;
+  --surface-3: #18233c;
+  --border: #1e2b45;
+  --border-strong: #2a3c5f;
+  --fg: #e8eefb;
+  --muted: #8ea3c2;
+  --brand: #22d3ee;
+  --brand-2: #6366f1;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --danger: #f43f5e;
+  --info: #38bdf8;
+  --glow: 0 0 0 1px rgb(34 211 238 / 0.25), 0 12px 40px -18px rgb(34 211 238 / 0.55);
+}
+
+.light {
+  --bg: #f4f7fc;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --surface-3: #eef2f8;
+  --border: #dbe3ee;
+  --border-strong: #c3cddd;
+  --fg: #0d1524;
+  --muted: #5a6b85;
+  --brand: #0891b2;
+  --brand-2: #4f46e5;
+  --ok: #16a34a;
+  --warn: #d97706;
+  --danger: #e11d48;
+  --info: #0284c7;
+  --glow: 0 0 0 1px rgb(8 145 178 / 0.2), 0 12px 30px -18px rgb(8 145 178 / 0.45);
+}
+
+/* ------------------------------------------------------------------ */
+/* Base                                                                */
+/* ------------------------------------------------------------------ */
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1100px 620px at 100% -10%, rgb(99 102 241 / 0.16), transparent 60%),
+      radial-gradient(900px 520px at -10% 110%, rgb(34 211 238 / 0.12), transparent 55%),
+      var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "ss02";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: rgb(34 211 238 / 0.3);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+
+  /* Thin, themed scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Utilities                                                           */
+/* ------------------------------------------------------------------ */
+@utility glass {
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: blur(14px) saturate(140%);
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+}
+
+@utility panel {
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+}
+
+@utility num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  direction: ltr;
+  unicode-bidi: plaintext;
+}
+
+@utility grid-noise {
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--border) 40%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--border) 40%, transparent) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgb(244 63 94 / 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 12px rgb(244 63 94 / 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgb(244 63 94 / 0);
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.35s ease both;
+}
+.animate-pulse-ring {
+  animation: pulse-ring 1.8s infinite;
+}
+.animate-spin-slow {
+  animation: spin-slow 2.4s linear infinite;
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(100%);
+  background: linear-gradient(90deg, transparent, rgb(148 163 184 / 0.14), transparent);
+  animation: shimmer 1.4s infinite;
+}
+
+/* Recharts tweaks so charts follow the theme */
+.recharts-default-tooltip {
+  background: var(--surface-2) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 0.75rem !important;
+  direction: rtl;
+}
+.recharts-cartesian-axis-tick text {
+  fill: var(--muted);
+  font-size: 11px;
+}

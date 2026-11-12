@@ -1,0 +1,23 @@
+# CameraSmart — AI / GPU runtime.
+#
+# Version matrix chosen so PyTorch, TorchVision, ONNX Runtime and the CUDA
+# runtime shipped inside the wheels are mutually compatible on a machine with
+# an NVIDIA driver >= 550 (CUDA 12.4 wheels run fine on newer 12.x/13.x
+# drivers thanks to driver backward compatibility).
+#
+#   driver 592.27 (CUDA 13.1 capable)  ->  cu124 wheels: OK
+#   Python 3.11                        ->  cp311 wheels: required
+#
+# Install with the CUDA index, e.g.:
+#   pip install -r requirements-ai.txt \
+#       --extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+onnxruntime-gpu>=1.20.1
+opencv-python>=4.10.0.84
+numpy>=1.26,<2.0
+scipy>=1.11
+rfdetr>=1.2.0
+supervision>=0.22
+pynvml>=11.5
+transformers>=4.44
