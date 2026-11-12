@@ -263,11 +263,11 @@ export function ObjectDetailPage() {
                       <Badge tone={image.is_best ? "brand" : "muted"}>
                         {image.is_best ? "بهترین تصویر" : eventTypeLabel(image.kind)}
                       </Badge>
-                      <p className="mt-1 truncate text-[10px] text-muted">
+                      <p className="mt-1 truncate text-[11px] text-muted">
                         {formatJalaliDateTime(image.captured_at)}
                       </p>
                     </div>
-                    <span className="num shrink-0 text-[10px] text-muted">
+                    <span className="num shrink-0 text-[11px] text-muted">
                       {faNumber(image.quality_score * 100, 0)}٪
                     </span>
                   </div>

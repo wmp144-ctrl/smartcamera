@@ -50,7 +50,7 @@ export function Tabs<T extends string>({
             {item.icon}
             {item.label}
             {item.badge !== undefined && item.badge !== null ? (
-              <span className="num rounded-full bg-surface-3 px-1.5 text-[10px]">{item.badge}</span>
+              <span className="num rounded-full bg-surface-3 px-1.5 text-[11px]">{item.badge}</span>
             ) : null}
           </button>
         );

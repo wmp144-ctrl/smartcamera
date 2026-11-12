@@ -112,7 +112,7 @@ export function JalaliDatePicker({
             </button>
           </div>
 
-          <div className="mb-1 grid grid-cols-7 gap-1 text-center text-[10px] text-muted">
+          <div className="mb-1 grid grid-cols-7 gap-1 text-center text-[11px] text-muted">
             {JALALI_WEEKDAYS_SHORT.map((day) => (
               <span key={day}>{day}</span>
             ))}
@@ -157,7 +157,7 @@ export function JalaliDatePicker({
             >
               امروز
             </button>
-            <span className="num text-[10px] text-muted">
+            <span className="num text-[11px] text-muted">
               {toFaDigits(today.year)}/{toFaDigits(String(today.month).padStart(2, "0"))}/
               {toFaDigits(String(today.day).padStart(2, "0"))}
               {" — "}

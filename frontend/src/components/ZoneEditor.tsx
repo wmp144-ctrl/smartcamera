@@ -262,7 +262,7 @@ export function ZoneEditor({ camera, aspectRatio, className }: ZoneEditorProps) 
             ))}
           </svg>
 
-          <div className="pointer-events-none absolute bottom-2 right-2 rounded-lg bg-[#020617]/75 px-2 py-1 text-[10px] text-muted backdrop-blur">
+          <div className="pointer-events-none absolute bottom-2 right-2 rounded-lg bg-[#020617]/75 px-2 py-1 text-[11px] text-muted backdrop-blur">
             {draft.length === 0
               ? "برای شروع، یک ابزار رسم را انتخاب کنید"
               : `${toFaDigits(draft.length)} نقطه ثبت شده — ${
@@ -314,7 +314,7 @@ export function ZoneEditor({ camera, aspectRatio, className }: ZoneEditorProps) 
                           )
                         }
                         className={cn(
-                          "rounded-full border px-2 py-0.5 text-[10px] transition-colors",
+                          "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
                           active
                             ? "border-brand/50 bg-brand/15 text-brand"
                             : "border-border bg-surface-2 text-muted hover:text-fg",
@@ -348,7 +348,7 @@ export function ZoneEditor({ camera, aspectRatio, className }: ZoneEditorProps) 
               ) : null}
             </div>
             {!canSave && draft.length > 0 ? (
-              <p className="text-[10px] text-warn">
+              <p className="text-[11px] text-warn">
                 {kind === "line" ? "خط عبور باید دقیقاً دو نقطه داشته باشد" : "ناحیه باید حداقل سه نقطه داشته باشد"}
               </p>
             ) : null}
@@ -374,7 +374,7 @@ export function ZoneEditor({ camera, aspectRatio, className }: ZoneEditorProps) 
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <p className="truncate text-[11px] font-medium">{zone.name}</p>
-                      <p className="mt-0.5 text-[10px] text-muted">
+                      <p className="mt-0.5 text-[11px] text-muted">
                         {KIND_LABELS[zone.kind]} — {toFaDigits(zone.points.length)} نقطه
                       </p>
                     </div>
@@ -403,11 +403,11 @@ export function ZoneEditor({ camera, aspectRatio, className }: ZoneEditorProps) 
                       <Badge tone="danger">هشدار فعال</Badge>
                       {zone.alert_sound ? <Badge tone="warn">صدا</Badge> : null}
                       {zone.alert_classes.length > 0 ? (
-                        <span className="text-[10px] text-muted">
+                        <span className="text-[11px] text-muted">
                           {zone.alert_classes.map((key) => classLabel(key)).join("، ")}
                         </span>
                       ) : (
-                        <span className="text-[10px] text-muted">همه کلاس‌ها</span>
+                        <span className="text-[11px] text-muted">همه کلاس‌ها</span>
                       )}
                     </div>
                   ) : null}

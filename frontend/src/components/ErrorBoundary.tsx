@@ -32,7 +32,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBound
             صفحه به‌درستی نمایش داده نشد. با بارگذاری مجدد، برنامه بازنشانی می‌شود؛
             داده‌های ضبط‌شده آسیبی نمی‌بینند.
           </p>
-          <pre className="mt-3 max-h-32 overflow-auto rounded-xl bg-surface-2/70 p-3 text-left text-[10px] text-danger">
+          <pre className="mt-3 max-h-32 overflow-auto rounded-xl bg-surface-2/70 p-3 text-left text-[11px] text-danger">
             {this.state.error.message}
           </pre>
           <button

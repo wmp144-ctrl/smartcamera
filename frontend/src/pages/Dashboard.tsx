@@ -153,7 +153,7 @@ export function DashboardPage() {
         />
         <Metric
           label="اشیای ثبت‌شده امروز"
-          value={toFaDigits(data?.objects_today ?? 0)}
+          value={toFaDigits(data?.tracks_today ?? 0)}
           icon={<ScanEye />}
           tone="brand"
           hint={`مجموع کل: ${toFaDigits(data?.total_tracks ?? 0)}`}
@@ -279,7 +279,7 @@ export function DashboardPage() {
                       <ScanEye className="size-3" /> نرخ تشخیص
                     </p>
                     <p className="num mt-1 text-sm font-bold">
-                      {faNumber(device.detection_fps, 1)} <span className="text-[10px] text-muted">fps</span>
+                      {faNumber(device.detection_fps, 1)} <span className="text-[11px] text-muted">fps</span>
                     </p>
                   </div>
                 </div>
@@ -290,7 +290,7 @@ export function DashboardPage() {
                   <span className="num font-bold text-brand">{toFaDigits(device.active_cameras)}</span>
                 </div>
                 {gpu.data?.driver_version ? (
-                  <p className="text-[10px] text-muted">
+                  <p className="text-[11px] text-muted">
                     درایور {toFaDigits(gpu.data.driver_version)}
                     {gpu.data.cuda_version ? ` — CUDA ${toFaDigits(gpu.data.cuda_version)}` : ""}
                   </p>
@@ -337,7 +337,7 @@ export function DashboardPage() {
             )}
             <div className="mt-2 flex flex-wrap gap-2">
               {byType.map((entry) => (
-                <span key={entry.name} className="inline-flex items-center gap-1.5 text-[10px] text-muted">
+                <span key={entry.name} className="inline-flex items-center gap-1.5 text-[11px] text-muted">
                   <span className="size-2 rounded-full" style={{ background: entry.color }} />
                   {entry.name}
                   <span className="num">{toFaDigits(entry.value)}</span>
@@ -475,12 +475,12 @@ export function DashboardPage() {
                     <Badge tone={severityTone(event.severity)}>{eventTypeLabel(event.event_type)}</Badge>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-[11px]">{event.message}</p>
-                      <p className="mt-0.5 text-[10px] text-muted">
+                      <p className="mt-0.5 text-[11px] text-muted">
                         {event.camera_name} — {formatRelative(event.occurred_at)}
                       </p>
                     </div>
                     {event.object_type ? (
-                      <span className="shrink-0 text-[10px] text-muted">{classLabel(event.object_type)}</span>
+                      <span className="shrink-0 text-[11px] text-muted">{classLabel(event.object_type)}</span>
                     ) : null}
                   </li>
                 ))}
@@ -507,13 +507,13 @@ export function DashboardPage() {
                     <StatusDot tone={tone} pulse={status?.state === "online"} />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-[11px] font-medium">{camera.camera_name}</p>
-                      <p className="text-[10px] text-muted">
+                      <p className="text-[11px] text-muted">
                         <span className="num">{toFaDigits(camera.total_tracks)}</span> شیء —{" "}
                         <span className="num">{toFaDigits(camera.total_events)}</span> رویداد —{" "}
                         <span className="num">{toFaDigits(camera.total_alerts)}</span> هشدار
                       </p>
                     </div>
-                    <span className="num shrink-0 text-[10px] text-muted">{faNumber(camera.fps, 1)} fps</span>
+                    <span className="num shrink-0 text-[11px] text-muted">{faNumber(camera.fps, 1)} fps</span>
                   </Link>
                 );
               })

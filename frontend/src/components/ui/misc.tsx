@@ -92,7 +92,7 @@ export function Progress({
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-3">
         <div className={cn("h-full rounded-full transition-all duration-500", bar)} style={{ width: `${pct}%` }} />
       </div>
-      {showLabel ? <span className="num w-11 text-[10px] text-muted">{pct.toFixed(0)}%</span> : null}
+      {showLabel ? <span className="num w-11 text-[11px] text-muted">{pct.toFixed(0)}%</span> : null}
     </div>
   );
 }
@@ -142,7 +142,7 @@ export function Tooltip({ content, children }: { content: ReactNode; children: R
   return (
     <span className="group/tt relative inline-flex">
       {children}
-      <span className="pointer-events-none absolute bottom-[calc(100%+6px)] right-1/2 z-50 hidden translate-x-1/2 whitespace-nowrap rounded-lg border border-border bg-surface-2 px-2 py-1 text-[10px] text-fg shadow-lg group-hover/tt:block">
+      <span className="pointer-events-none absolute bottom-[calc(100%+6px)] right-1/2 z-50 hidden translate-x-1/2 whitespace-nowrap rounded-lg border border-border bg-surface-2 px-2 py-1 text-[11px] text-fg shadow-lg group-hover/tt:block">
         {content}
       </span>
     </span>
@@ -186,7 +186,7 @@ export function Metric({
         <span className={cn("num text-xl font-bold leading-none", toneClass)}>{value}</span>
         {unit ? <span className="text-[11px] text-muted">{unit}</span> : null}
       </div>
-      {hint ? <p className="mt-1.5 text-[10px] text-muted">{hint}</p> : null}
+      {hint ? <p className="mt-1.5 text-[11px] text-muted">{hint}</p> : null}
     </div>
   );
 }

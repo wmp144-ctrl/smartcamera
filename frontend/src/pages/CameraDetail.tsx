@@ -137,7 +137,7 @@ function LivePanel({ cameraId, fps }: { cameraId: number; fps: number }) {
                 {detection.tracks.map((track) => (
                   <li key={track.track_id} className="flex items-center gap-3 px-3 py-2">
                     <Badge tone="brand">{classLabel(track.object_type)}</Badge>
-                    <div className="min-w-0 flex-1 text-[10px] text-muted">
+                    <div className="min-w-0 flex-1 text-[11px] text-muted">
                       <p className="num">شناسه {toFaDigits(track.track_id)}</p>
                       <p>
                         {DIRECTION_ARROWS[track.direction] ?? "•"} {directionLabel(track.direction)}
@@ -410,7 +410,7 @@ function ConnectionPanel({ cameraId, policy, rtspUrl }: { cameraId: number; poli
           {result ? (
             <p className="rounded-xl border border-info/40 bg-info/10 px-3 py-2 text-[11px] text-info">{result}</p>
           ) : null}
-          <p className="text-[10px] leading-6 text-muted">
+          <p className="text-[11px] leading-6 text-muted">
             برای تغییر آدرس RTSP از دکمه ویرایش در همین صفحه استفاده کنید.
           </p>
         </CardBody>

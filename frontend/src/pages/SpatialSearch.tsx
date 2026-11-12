@@ -178,7 +178,7 @@ export function SpatialSearchPage() {
               </Field>
             </div>
 
-            <div className="rounded-xl border border-border bg-surface-2/60 px-3 py-2 text-[10px] leading-6 text-muted">
+            <div className="rounded-xl border border-border bg-surface-2/60 px-3 py-2 text-[11px] leading-6 text-muted">
               بازه انتخابی: {formatJalaliLong(from)} ساعت {fromTime} تا {formatJalaliLong(to)} ساعت {toTime} (به وقت
               محلی)
             </div>

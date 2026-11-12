@@ -38,11 +38,12 @@ export function ObjectCard({
               alt={`تصویر کامل ${classLabel(track.object_type)}`}
               className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
               loading="lazy"
+              decoding="async"
             />
           ) : (
-            <span className="grid h-full w-full place-items-center text-[10px] text-muted">تصویر کامل</span>
+            <span className="grid h-full w-full place-items-center text-[11px] text-muted">تصویر کامل</span>
           )}
-          <span className="absolute bottom-1 right-1 rounded bg-[#020617]/80 px-1.5 py-0.5 text-[9px] text-muted">
+          <span className="absolute bottom-1 right-1 rounded bg-[#020617]/80 px-1.5 py-0.5 text-[11px] text-muted">
             کامل
           </span>
         </Link>
@@ -57,11 +58,12 @@ export function ObjectCard({
               alt={`برش ${classLabel(track.object_type)}`}
               className="h-full w-full object-cover"
               loading="lazy"
+              decoding="async"
             />
           ) : (
-            <span className="grid h-full w-full place-items-center text-[10px] text-muted">برش</span>
+            <span className="grid h-full w-full place-items-center text-[11px] text-muted">برش</span>
           )}
-          <span className="absolute bottom-1 right-1 rounded bg-[#020617]/80 px-1.5 py-0.5 text-[9px] text-muted">
+          <span className="absolute bottom-1 right-1 rounded bg-[#020617]/80 px-1.5 py-0.5 text-[11px] text-muted">
             برش
           </span>
         </Link>
@@ -85,7 +87,7 @@ export function ObjectCard({
           </Link>
         </div>
 
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted">
           <span className="inline-flex items-center gap-1">
             <ScanEye className="size-3" /> اطمینان{" "}
             <span className="num">{faNumber(track.confidence * 100, 0)}٪</span>
@@ -105,7 +107,7 @@ export function ObjectCard({
           <span className="num">{toFaDigits(track.frame_count)} فریم</span>
         </div>
 
-        <p className="truncate text-[10px] text-muted" title={track.first_seen_jalali}>
+        <p className="truncate text-[11px] text-muted" title={track.first_seen_jalali}>
           {formatJalaliDateTime(track.first_seen)} — {formatRelative(track.first_seen)}
         </p>
 

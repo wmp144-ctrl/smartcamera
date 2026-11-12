@@ -21,8 +21,16 @@ interface NavItem {
   badge?: number;
 }
 
-export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
-  const collapsed = useUI((state) => state.sidebarCollapsed);
+export function Sidebar({
+  onNavigate,
+  forceExpanded = false,
+}: {
+  onNavigate?: () => void;
+  /** The mobile drawer always shows labels, even if the desktop rail is collapsed. */
+  forceExpanded?: boolean;
+}) {
+  const storedCollapsed = useUI((state) => state.sidebarCollapsed);
+  const collapsed = forceExpanded ? false : storedCollapsed;
   const unreadFromApi = useUnreadAlerts();
   const unreadLocal = useUI((state) => state.unreadAlerts);
   const unread = Math.max(unreadFromApi.data?.unread ?? 0, unreadLocal);
@@ -52,7 +60,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         {!collapsed ? (
           <div className="min-w-0">
             <p className="truncate text-sm font-bold leading-tight">CameraSmart</p>
-            <p className="truncate text-[10px] text-muted">پایش هوشمند دوربین</p>
+            <p className="truncate text-[11px] text-muted">پایش هوشمند دوربین</p>
           </div>
         ) : null}
       </div>
@@ -79,7 +87,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             {item.badge && item.badge > 0 ? (
               <span
                 className={cn(
-                  "num rounded-full bg-danger/20 px-1.5 text-[10px] font-bold text-danger",
+                  "num rounded-full bg-danger/20 px-1.5 text-[11px] font-bold text-danger",
                   collapsed && "absolute mt-[-18px] mr-[-24px] px-1",
                 )}
               >
@@ -93,7 +101,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       {!collapsed ? (
         <div className="border-t border-border p-3">
           <div className="rounded-xl border border-border bg-surface-2/60 p-2.5">
-            <p className="text-[10px] leading-5 text-muted">
+            <p className="text-[11px] leading-5 text-muted">
               نسخه ۱.۰.۰ — ذخیره‌سازی محلی، بدون نیاز به اینترنت
             </p>
           </div>

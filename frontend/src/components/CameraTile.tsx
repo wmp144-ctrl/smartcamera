@@ -1,4 +1,4 @@
-import { ExternalLink, Eye, EyeOff, Gauge, ScanEye, TriangleAlert, Video, VideoOff } from "lucide-react";
+import { ExternalLink, Eye, EyeOff, ScanEye, TriangleAlert, Video, VideoOff } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type Camera, type CameraStatus } from "../lib/api";
@@ -13,7 +13,7 @@ import {
 } from "../lib/utils";
 import { useLive } from "../store/live";
 import { useUI } from "../store/ui";
-import { Badge, StatusDot } from "./ui/badge";
+import { StatusDot } from "./ui/badge";
 
 export function CameraTile({
   camera,
@@ -66,7 +66,7 @@ export function CameraTile({
         )}
 
         <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-[#020617]/85 to-transparent p-2.5">
-          <span className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-[#020617]/70 px-2 py-0.5 text-[10px] backdrop-blur">
+          <span className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-[#020617]/70 px-2 py-0.5 text-[11px] backdrop-blur">
             <StatusDot tone={tone} pulse={status?.state === "online"} />
             {cameraStateLabel(status?.state ?? (camera.enabled ? "unknown" : "disabled"))}
           </span>
@@ -74,14 +74,14 @@ export function CameraTile({
             {camera.detection_enabled && status?.detector_error ? (
               <span
                 title={`موتور تشخیص بارگذاری نشده است: ${status.detector_error}`}
-                className="inline-flex items-center gap-1 rounded-full border border-warn/50 bg-[#020617]/70 px-2 py-0.5 text-[10px] text-warn backdrop-blur"
+                className="inline-flex items-center gap-1 rounded-full border border-warn/50 bg-[#020617]/70 px-2 py-0.5 text-[11px] text-warn backdrop-blur"
               >
                 <TriangleAlert className="size-3" />
                 تشخیص غیرفعال
               </span>
             ) : null}
             {camera.detection_enabled ? (
-              <span className="inline-flex items-center gap-1 rounded-full border border-brand/40 bg-[#020617]/70 px-2 py-0.5 text-[10px] text-brand backdrop-blur">
+              <span className="inline-flex items-center gap-1 rounded-full border border-brand/40 bg-[#020617]/70 px-2 py-0.5 text-[11px] text-brand backdrop-blur">
                 <ScanEye className="size-3" />
                 <span className="num">{toFaDigits(detection?.tracks.length ?? 0)}</span>
               </span>
@@ -97,28 +97,22 @@ export function CameraTile({
           </div>
         </div>
 
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 bg-gradient-to-t from-[#020617]/90 to-transparent p-2.5">
-          <div className="min-w-0">
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 bg-gradient-to-t from-[#020617] via-[#020617]/70 to-transparent px-2.5 pb-2.5 pt-10">
+          <div className="min-w-0 [text-shadow:0_1px_4px_rgb(0_0_0/0.95)]">
             <Link
               to={`/cameras/${camera.id}`}
               className="pointer-events-auto block truncate text-xs font-semibold hover:text-brand"
             >
               {camera.name}
             </Link>
-            <p className="truncate text-[10px] text-muted">
+            <p className="truncate text-[11px] text-muted">
               {camera.location || "بدون موقعیت"} — {resolution}
             </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted">
-            <Badge tone={status?.state === "online" ? "ok" : "muted"}>
-              <Gauge className="size-3" />
-              <span className="num">{faNumber(status?.fps ?? 0, 1)}</span>
-            </Badge>
           </div>
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-[10px] text-muted">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-[11px] text-muted">
         <div className="flex flex-wrap items-center gap-2.5">
           <span className="inline-flex items-center gap-1">
             <Video className="size-3" />
@@ -141,7 +135,7 @@ export function CameraTile({
           ) : null}
           <Link
             to={`/cameras/${camera.id}`}
-            className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] text-muted transition-colors hover:bg-surface-2 hover:text-fg"
+            className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-surface-2 hover:text-fg"
           >
             <ExternalLink className="size-3" />
             جزئیات

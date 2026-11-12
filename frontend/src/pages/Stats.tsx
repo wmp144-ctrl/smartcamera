@@ -224,7 +224,7 @@ export function StatsPage() {
                 </div>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {typeSeries.slice(0, 8).map((item, index) => (
-                    <span key={item.key} className="inline-flex items-center gap-1.5 text-[10px] text-muted">
+                    <span key={item.key} className="inline-flex items-center gap-1.5 text-[11px] text-muted">
                       <span className="size-2 rounded-full" style={{ background: COLORS[index % COLORS.length] }} />
                       {classLabel(item.key)}
                       <span className="num">{toFaDigits(item.count)}</span>
@@ -321,7 +321,7 @@ export function StatsPage() {
                           style={{ width: `${(item.count / max) * 100}%` }}
                         />
                       </div>
-                      <span className="num w-10 shrink-0 text-left text-[10px] text-muted">
+                      <span className="num w-10 shrink-0 text-left text-[11px] text-muted">
                         {toFaDigits(item.count)}
                       </span>
                     </div>

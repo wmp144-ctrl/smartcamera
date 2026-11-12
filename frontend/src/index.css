@@ -1,4 +1,7 @@
 @import "tailwindcss";
+/* Vazirmatn (variable, SIL OFL) is bundled locally: the console must render the
+   same on an offline machine as on a connected one, so no Google Fonts link. */
+@import "@fontsource-variable/vazirmatn";
 
 /* ------------------------------------------------------------------ */
 /* Design tokens                                                       */
@@ -19,9 +22,27 @@
   --color-danger: var(--danger);
   --color-info: var(--info);
 
-  --font-sans: "Vazirmatn", "IRANSansX", "IRANSans", "Segoe UI", Tahoma, "Noto Sans Arabic",
-    system-ui, sans-serif;
+  --font-sans: "Vazirmatn Variable", "Vazirmatn", "IRANSansX", "Segoe UI", Tahoma,
+    "Noto Sans Arabic", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+
+  /* Persian needs more vertical air than Latin at the same size: the default
+     Tailwind scale (12px/1.5) is too tight for Persian glyphs in tables and
+     badges, so every step is slightly larger with a taller line height. */
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.7;
+  --text-sm: 0.9063rem;
+  --text-sm--line-height: 1.75;
+  --text-base: 1rem;
+  --text-base--line-height: 1.8;
+  --text-lg: 1.125rem;
+  --text-lg--line-height: 1.6;
+  --text-xl: 1.3125rem;
+  --text-xl--line-height: 1.5;
+  --text-2xl: 1.625rem;
+  --text-2xl--line-height: 1.4;
+  --text-3xl: 2rem;
+  --text-3xl--line-height: 1.3;
 }
 
 :root {
@@ -51,8 +72,10 @@
   --border-strong: #c3cddd;
   --fg: #0d1524;
   --muted: #5a6b85;
-  --brand: #0891b2;
-  --brand-2: #4f46e5;
+  /* Darker than the dark-theme cyan: #0891b2 on white is only ~3.3:1, which
+     fails AA for small text; #0e7490 reaches ~4.7:1. */
+  --brand: #0e7490;
+  --brand-2: #4338ca;
   --ok: #16a34a;
   --warn: #d97706;
   --danger: #e11d48;
@@ -82,9 +105,11 @@
       var(--bg);
     color: var(--fg);
     font-family: var(--font-sans);
-    font-feature-settings: "ss01", "ss02";
+    line-height: 1.75;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+    /* Persian numerals should stay a touch larger than Latin at tiny sizes. */
+    font-variant-numeric: proportional-nums;
   }
 
   ::selection {
@@ -140,8 +165,12 @@
 }
 
 @utility num {
-  font-family: var(--font-mono);
+  /* Numbers were rendered in Consolas, which has no Persian digits: the browser
+     borrowed them from a random fallback, so columns of numbers never aligned.
+     Vazirmatn ships tabular figures, which is what tables and clocks need. */
+  font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
   direction: ltr;
   unicode-bidi: plaintext;
 }
@@ -185,6 +214,20 @@
 @keyframes spin-slow {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* Respect the OS "reduce motion" setting: the pulse rings, shimmer skeletons
+   and fade-ups are decorative and cost frames on the same GPU that runs the
+   detector. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 

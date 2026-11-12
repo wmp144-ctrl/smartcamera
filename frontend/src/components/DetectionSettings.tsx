@@ -232,7 +232,7 @@ export function DetectionSettings({ camera }: { camera: Camera }) {
                         className="size-4 accent-[var(--brand)]"
                       />
                       {CLASS_LABELS_FA[key] ?? classLabel(key)}
-                      <span className="text-[10px] text-muted">({key})</span>
+                      <span className="text-[11px] text-muted">({key})</span>
                     </label>
                     <div className="flex items-center gap-2">
                       {!rule.enabled ? <Badge tone="muted">غیرفعال</Badge> : null}
@@ -297,7 +297,7 @@ export function DetectionSettings({ camera }: { camera: Camera }) {
         </div>
 
         <div className="flex items-center justify-between gap-2 border-t border-border px-3 py-2.5">
-          <span className="text-[10px] text-muted">
+          <span className="text-[11px] text-muted">
             <Plus className="inline size-3" /> قواعد روی پردازش زنده همین دوربین اعمال می‌شود.
           </span>
           <Button size="sm" variant="primary" onClick={handleSave} loading={update.isPending}>

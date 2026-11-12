@@ -257,12 +257,12 @@ export function AlertsPage() {
                         <Badge tone={severityTone(item.severity)}>
                           {item.severity === "critical" ? "بحرانی" : item.severity === "warning" ? "هشدار" : "اطلاع"}
                         </Badge>
-                        <span className="text-[10px] text-muted">{formatRelative(item.at)}</span>
+                        <span className="text-[11px] text-muted">{formatRelative(item.at)}</span>
                       </div>
                       <p className="mt-1 text-[11px] font-medium">{item.title}</p>
-                      <p className="mt-0.5 text-[10px] leading-5 text-muted">{item.message}</p>
+                      <p className="mt-0.5 text-[11px] leading-5 text-muted">{item.message}</p>
                       {item.cameraName ? (
-                        <p className="mt-1 text-[10px] text-muted">دوربین: {item.cameraName}</p>
+                        <p className="mt-1 text-[11px] text-muted">دوربین: {item.cameraName}</p>
                       ) : null}
                     </li>
                   ))}
@@ -282,7 +282,7 @@ export function AlertsPage() {
                   title="نمونه قالب تاریخ شمسی"
                 />
               </Field>
-              <p className="mt-2 text-[10px] leading-6 text-muted">
+              <p className="mt-2 text-[11px] leading-6 text-muted">
                 همه زمان‌ها در پایگاه داده به وقت UTC ذخیره و در رابط کاربری به وقت محلی و تقویم شمسی نمایش داده
                 می‌شوند. منطقه زمانی پیش‌فرض: Asia/Tehran.
               </p>
@@ -311,7 +311,7 @@ function AlertRow({
       <div className="min-w-0 flex-1">
         <p className="text-xs font-medium">{alert.title}</p>
         <p className="mt-1 text-[11px] leading-6 text-muted">{alert.message}</p>
-        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[10px] text-muted">
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-muted">
           <span>{cameraNames.get(alert.camera_id) ?? `#${alert.camera_id}`}</span>
           <span className="text-muted">•</span>
           <span>{formatJalaliDateTime(alert.triggered_at)}</span>

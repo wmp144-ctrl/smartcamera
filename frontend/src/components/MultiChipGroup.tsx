@@ -44,7 +44,7 @@ export function MultiChipGroup<T extends string | number>({
             <button
               type="button"
               onClick={() => onChange([])}
-              className="inline-flex items-center gap-1 text-[10px] text-muted hover:text-danger"
+              className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-danger"
             >
               <X className="size-3" />
               پاک کردن
@@ -70,7 +70,7 @@ export function MultiChipGroup<T extends string | number>({
             >
               {option.label}
               {option.count !== undefined ? (
-                <span className="num text-[10px] opacity-75">{toFaDigits(option.count)}</span>
+                <span className="num text-[11px] opacity-75">{toFaDigits(option.count)}</span>
               ) : null}
             </button>
           );

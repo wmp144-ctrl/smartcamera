@@ -24,7 +24,7 @@ export function Label({
         {children}
         {required ? <span className="text-danger"> *</span> : null}
       </span>
-      {hint ? <span className="text-[10px] text-muted/80">{hint}</span> : null}
+      {hint ? <span className="text-[11px] text-muted/80">{hint}</span> : null}
     </label>
   );
 }

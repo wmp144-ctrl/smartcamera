@@ -411,8 +411,8 @@ class DetectionPipeline:
                     runtime_track_id=track.track_id,
                     bbox=list(track.bbox),
                     message=(
-                        f"ورود «{class_label(track.object_type)}» به کادر دوربین "
-                        f"{self.config.camera_name}"
+                        f"ورود «{class_label(track.object_type)}» به کادر "
+                        f"«{self.config.camera_name}»"
                     ),
                     attach_image_kind="enter",
                     meta={"frame_number": track.hits},
@@ -466,8 +466,8 @@ class DetectionPipeline:
                     runtime_track_id=track.track_id,
                     bbox=list(track.bbox),
                     message=(
-                        f"«{class_label(track.object_type)}» در دوربین "
-                        f"{self.config.camera_name} به مدت "
+                        f"«{class_label(track.object_type)}» در "
+                        f"«{self.config.camera_name}» به مدت "
                         f"{int(self.config.stationary_after_seconds)} ثانیه ثابت مانده است"
                     ),
                     meta={"motion_state": "stationary", "duration": round(track.duration, 2)},
@@ -613,8 +613,8 @@ class DetectionPipeline:
                 runtime_track_id=track.track_id,
                 bbox=list(track.bbox),
                 message=(
-                    f"خروج «{class_label(track.object_type)}» از کادر دوربین "
-                    f"{self.config.camera_name}"
+                    f"خروج «{class_label(track.object_type)}» از کادر "
+                    f"«{self.config.camera_name}»"
                 ),
                 attach_image_kind="exit" if runtime.exit_image_captured else "best",
                 meta={

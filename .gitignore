@@ -36,3 +36,6 @@ Thumbs.db
 
 # --- editor tooling metadata ---------------------------------------------
 .freebuff/
+
+# UI review screenshots
+ui-shots/

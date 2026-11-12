@@ -49,7 +49,7 @@ function JalaliClock() {
           ).padStart(2, "0")}`,
         )}
       </span>
-      <span className="text-[10px] text-muted">
+      <span className="text-[11px] text-muted">
         {weekday} — {formatJalaliDate(jalali)}
       </span>
     </div>
@@ -86,7 +86,7 @@ function ConnectionPill() {
   const label = connection === "open" ? "زنده" : connection === "connecting" ? "در حال اتصال" : "قطع";
   return (
     <span
-      className="hidden items-center gap-2 rounded-full border border-border bg-surface-2/60 px-2.5 py-1 text-[10px] text-muted sm:inline-flex"
+      className="hidden items-center gap-2 rounded-full border border-border bg-surface-2/60 px-2.5 py-1 text-[11px] text-muted sm:inline-flex"
       title={lastMessageAt ? `آخرین پیام ${formatRelative(lastMessageAt)}` : "هنوز پیامی دریافت نشده"}
     >
       <StatusDot tone={tone} pulse={connection === "open"} />
@@ -119,7 +119,7 @@ function NotificationBell() {
       >
         <Bell />
         {unread > 0 ? (
-          <span className="absolute -left-0.5 -top-0.5 grid size-4 place-items-center rounded-full bg-danger text-[9px] font-bold text-white">
+          <span className="absolute -left-0.5 -top-0.5 grid size-4 place-items-center rounded-full bg-danger text-[11px] font-bold text-white">
             {unread > 9 ? "۹+" : toFaDigits(unread)}
           </span>
         ) : null}
@@ -160,7 +160,7 @@ function NotificationBell() {
                 <button
                   type="button"
                   onClick={clear}
-                  className="rounded-lg px-2 py-1 text-[10px] text-muted hover:bg-surface-2 hover:text-fg"
+                  className="rounded-lg px-2 py-1 text-[11px] text-muted hover:bg-surface-2 hover:text-fg"
                 >
                   پاک کردن
                 </button>
@@ -183,8 +183,8 @@ function NotificationBell() {
                     </Badge>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-[11px] font-medium">{item.title}</p>
-                      <p className="mt-0.5 line-clamp-2 text-[10px] leading-5 text-muted">{item.message}</p>
-                      <p className="mt-1 text-[9px] text-muted">
+                      <p className="mt-0.5 line-clamp-2 text-[11px] leading-5 text-muted">{item.message}</p>
+                      <p className="mt-1 text-[11px] text-muted">
                         {item.cameraName ? `${item.cameraName} — ` : ""}
                         {formatRelative(item.at)}
                       </p>
@@ -192,7 +192,7 @@ function NotificationBell() {
                     <button
                       type="button"
                       onClick={() => dismiss(item.id)}
-                      className="text-[10px] text-muted hover:text-danger"
+                      className="text-[11px] text-muted hover:text-danger"
                     >
                       حذف
                     </button>
@@ -240,7 +240,10 @@ export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {
       <div className="flex items-center gap-2">
         <ConnectionPill />
         <span className="hidden sm:inline-flex">{connectionIcon}</span>
-        <GpuMini />
+        {/* Keep the phone layout breathable: GPU telemetry is a desktop nicety. */}
+        <span className="hidden sm:inline-flex">
+          <GpuMini />
+        </span>
       </div>
 
       <div className="flex-1" />

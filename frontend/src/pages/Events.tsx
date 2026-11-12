@@ -267,9 +267,10 @@ export function EventsPage() {
                             alt={eventTypeLabel(event.event_type)}
                             className="h-full w-full object-cover"
                             loading="lazy"
+                            decoding="async"
                           />
                         ) : (
-                          <span className="grid h-full place-items-center text-[9px] text-muted">—</span>
+                          <span className="grid h-full place-items-center text-[11px] text-muted">—</span>
                         )}
                       </button>
                     </Td>
@@ -369,7 +370,7 @@ export function EventsPage() {
         footer={
           selected ? (
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[10px] text-muted">{formatJalaliDateTime(selected.occurred_at)}</span>
+              <span className="text-[11px] text-muted">{formatJalaliDateTime(selected.occurred_at)}</span>
               {!selected.acknowledged ? (
                 <Button
                   size="sm"

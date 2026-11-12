@@ -40,7 +40,7 @@ import { faNumber, formatBytes, formatRelative, toFaDigits } from "../lib/utils"
 import { useUI } from "../store/ui";
 
 function RawValue({ value }: { value: unknown }) {
-  return <span className="num break-all text-[10px]">{typeof value === "string" ? value : JSON.stringify(value)}</span>;
+  return <span className="num break-all text-[11px]">{typeof value === "string" ? value : JSON.stringify(value)}</span>;
 }
 
 export function SettingsPage() {
@@ -167,7 +167,7 @@ export function SettingsPage() {
                 />
                 <KeyValue label="پایگاه داده" value={<RawValue value={info.data?.database_url ?? "—"} />} />
                 <KeyValue label="مسیر ذخیره‌سازی" value={<RawValue value={info.data?.storage_root ?? "—"} />} />
-                <p className="mt-3 rounded-xl border border-border bg-surface-2/60 px-3 py-2 text-[10px] leading-6 text-muted">
+                <p className="mt-3 rounded-xl border border-border bg-surface-2/60 px-3 py-2 text-[11px] leading-6 text-muted">
                   همه زمان‌ها در پایگاه داده به وقت جهانی (UTC) ذخیره می‌شوند و در رابط کاربری با منطقه زمانی
                   انتخاب‌شده و تقویم شمسی نمایش داده می‌شوند.
                 </p>
@@ -223,14 +223,14 @@ export function SettingsPage() {
             {compatibilityNotes.length > 0 ? (
               <ul className="space-y-1.5">
                 {compatibilityNotes.map((note) => (
-                  <li key={note} className="text-[10px] leading-6 text-muted">
+                  <li key={note} className="text-[11px] leading-6 text-muted">
                     • {note}
                   </li>
                 ))}
               </ul>
             ) : null}
 
-            <p className="rounded-xl border border-border bg-surface-2/60 px-3 py-2 text-[10px] leading-6 text-muted">
+            <p className="rounded-xl border border-border bg-surface-2/60 px-3 py-2 text-[11px] leading-6 text-muted">
               کتابخانه‌های سنگین هوش مصنوعی (PyTorch/TorchVision/ONNX Runtime/RF-DETR) به‌صورت تنبل بارگذاری
               می‌شوند؛ برای راه‌اندازی آفلاین از اسکریپت‌های پوشه scripts استفاده کنید.
             </p>
@@ -266,7 +266,7 @@ export function SettingsPage() {
                       <Td>
                         {model.available ? <Badge tone="ok">موجود</Badge> : <Badge tone="muted">دانلود نشده</Badge>}
                       </Td>
-                      <Td className="max-w-[280px] text-[10px] text-muted">{model.description}</Td>
+                      <Td className="max-w-[280px] text-[11px] text-muted">{model.description}</Td>
                     </Tr>
                   ))}
                 </Tbody>
@@ -425,7 +425,7 @@ export function SettingsPage() {
             <div className="rounded-xl border border-border bg-surface-2/60 p-3">
               <p className="mb-2 text-[11px] font-medium">مصرف فضا به تفکیک دوربین</p>
               {Object.keys(storage.data?.by_camera ?? {}).length === 0 ? (
-                <p className="text-[10px] text-muted">داده‌ای برای نمایش نیست</p>
+                <p className="text-[11px] text-muted">داده‌ای برای نمایش نیست</p>
               ) : (
                 Object.entries(storage.data?.by_camera ?? {})
                   .sort((a, b) => b[1] - a[1])
@@ -471,7 +471,7 @@ export function SettingsPage() {
                 <div key={entry.key} className="space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
                     <span className="num text-[11px]">{entry.key}</span>
-                    <span className="text-[10px] text-muted">{entry.description ?? ""}</span>
+                    <span className="text-[11px] text-muted">{entry.description ?? ""}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <Input
@@ -504,7 +504,7 @@ export function SettingsPage() {
                       ذخیره
                     </Button>
                   </div>
-                  <p className="text-[10px] text-muted">آخرین تغییر: {formatRelative(entry.updated_at)}</p>
+                  <p className="text-[11px] text-muted">آخرین تغییر: {formatRelative(entry.updated_at)}</p>
                 </div>
               ))
             )}
@@ -536,12 +536,12 @@ export function SettingsPage() {
                 <div className="rounded-xl border border-border bg-surface-2/60 p-3">
                   <p className="mb-2 text-[11px] font-medium">دوربین‌ها</p>
                   {Object.entries((runtime.data?.cameras as Record<string, unknown>) ?? {}).length === 0 ? (
-                    <p className="text-[10px] text-muted">هیچ استریم فعالی وجود ندارد</p>
+                    <p className="text-[11px] text-muted">هیچ استریم فعالی وجود ندارد</p>
                   ) : (
                     Object.entries((runtime.data?.cameras as Record<string, Record<string, unknown>>) ?? {}).map(
                       ([cameraId, health]) => (
                         <div key={cameraId} className="mb-2 last:mb-0">
-                          <p className="num text-[10px] text-muted">دوربین #{toFaDigits(cameraId)}</p>
+                          <p className="num text-[11px] text-muted">دوربین #{toFaDigits(cameraId)}</p>
                           {Object.entries(health ?? {}).map(([key, value]) => (
                             <KeyValue key={key} label={key} value={<RawValue value={value} />} />
                           ))}

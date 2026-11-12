@@ -135,7 +135,7 @@ export function LoginPage({ configured, onSuccess }: LoginPageProps) {
               {setup ? "ذخیره رمز و ورود" : "ورود"}
             </Button>
 
-            <p className="flex items-start gap-2 text-[10px] leading-5 text-muted">
+            <p className="flex items-start gap-2 text-[11px] leading-5 text-muted">
               <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-ok" />
               این سامانه تک‌کاربره است و رمز در پایگاه داده به‌صورت هش‌شده ذخیره می‌شود. پس از
               چند تلاش ناموفق، ورود موقتاً قفل می‌شود.

@@ -502,9 +502,9 @@ export function CamerasPage() {
                     {cameraStateLabel(status?.state ?? (camera.enabled ? "unknown" : "disabled"))}
                   </Badge>
                   {status?.last_frame_at ? (
-                    <span className="text-[10px] text-muted">آخرین فریم {formatRelative(status.last_frame_at)}</span>
+                    <span className="text-[11px] text-muted">آخرین فریم {formatRelative(status.last_frame_at)}</span>
                   ) : null}
-                  <Link to={`/cameras/${camera.id}`} className="text-[10px] text-brand hover:underline">
+                  <Link to={`/cameras/${camera.id}`} className="text-[11px] text-brand hover:underline">
                     تنظیمات پیشرفته و نواحی
                   </Link>
                 </div>

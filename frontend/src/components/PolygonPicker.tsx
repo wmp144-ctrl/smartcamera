@@ -73,7 +73,7 @@ export function PolygonPicker({
           <button
             type="button"
             onClick={() => onChange([])}
-            className="inline-flex items-center gap-1 text-[10px] text-muted hover:text-danger"
+            className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-danger"
           >
             <X className="size-3" />
             حذف ناحیه
@@ -150,7 +150,7 @@ export function PolygonPicker({
         </svg>
       </div>
 
-      <p className="text-[10px] leading-6 text-muted">
+      <p className="text-[11px] leading-6 text-muted">
         روی تصویر کلیک کنید تا نقاط ناحیه مشخص شوند. جست‌وجو اشیایی را برمی‌گرداند که مرکز آن‌ها داخل این ناحیه
         قرار دارد.
       </p>
