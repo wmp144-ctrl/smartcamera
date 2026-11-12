@@ -12,7 +12,8 @@ python-multipart>=0.0.9
 websockets>=12
 orjson>=3.10
 psutil>=5.9
-numpy>=1.26,<3
+# numpy 2.x breaks the pinned torch/rfdetr wheels; keep the whole project on 1.x.
+numpy>=1.26,<2.0
 pillow>=10.2
 tzdata>=2024.1
 python-dotenv>=1.0

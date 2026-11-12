@@ -1,2 +1,4 @@
 -r requirements-core.txt
 -r requirements-ai.txt
+# Exact versions verified together (see the file for the rationale).
+-c constraints.txt
