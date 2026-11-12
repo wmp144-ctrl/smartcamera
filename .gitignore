@@ -39,3 +39,6 @@ Thumbs.db
 
 # UI review screenshots
 ui-shots/
+
+# Offline bundle download log
+offline-download.log

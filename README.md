@@ -113,33 +113,65 @@ npm run dev            # http://127.0.0.1:5173
 
 ## ۴. نصب کاملاً آفلاین
 
-روی ماشین **متصل** اجرا کنید:
+روی **هر سیستم ویندوزی متصل به اینترنت** اجرا کنید — لازم نیست پایتون ۳٫۱۱ باشد و
+Node.js هم نیاز نیست:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\download_offline.ps1
-# اختیاری: -CudaTag cu121 | cpu   -SkipFrontend   -SkipModels
+# اختیاری:
+#   -CudaTag cu124 | cu121 | cpu      (پیش‌فرض cu124، تأییدشده)
+#   -Models nano,small,base           (پیش‌فرض small,base)
+#   -ModelsFrom D:\roboflow-models     پوشه‌ای که rf-detr-*.pth در آن است
+#   -DryRun                            فقط بررسی دسترسی منابع و حجم (بدون دانلود)
+#   -OutDir D:\bundle                  خروجی در مسیر دیگر
 ```
 
-خروجی در پوشه `offline/` ساخته می‌شود:
+اسکریپت wheel ها را برای **Python 3.11 / win_amd64 (cp311)** دانلود می‌کند حتی اگر خودش
+با پایتون دیگری اجرا شود (`pip download --python-version 3.11 --platform win_amd64`).
+نسخه‌ها از `backend\constraints.txt` خوانده می‌شوند و اگر فایل‌های پروژه کنار اسکریپت
+نباشند، همان نسخه‌ها به‌صورت داخلی در اسکریپت وجود دارند. خروجی در پوشه `offline/`:
 
 ```
 offline/
-├── wheels/            همه بسته‌های پایتون (شامل torch/torchvision cu124)
-├── models/            وزن‌های RF-DETR
-├── frontend/dist/     رابط کاربری ساخته‌شده
-└── manifest.json      فهرست نسخه‌ها
+├── wheels/            همه wheel های پایتون + خود pip (شامل torch/torchvision cu124)
+├── models/            وزن‌های RF-DETR (small/base، با بررسی MD5)
+├── bin/               ffmpeg.exe و ffprobe.exe برای ویندوز
+├── frontend/dist/     رابط کاربری ساخته‌شده (فونت داخلش هست)
+├── app/               سورس برنامه + اسکریپت نصب (ماشین مقصد فقط همین پوشه را می‌خواهد)
+├── install_offline.ps1
+├── README-INSTALL.txt
+└── manifest.json      فهرست نسخه‌ها و وضعیت اجزا
 ```
 
-کل پوشه را به ماشین **آفلاین** منتقل کنید و اجرا کنید:
+> **وزن‌های مدل:** اسکریپت اول از `%USERPROFILE%\.roboflow\models` (یا `-ModelsFrom`)
+> کپی می‌کند و اگر نبود از `storage.googleapis.com` یا `repo.roboflow.com` دانلود می‌کند.
+> اگر در شبکه شما این میزبان‌ها مسدود باشند (همین سیستم خطای ۴۰۳ «not available in your
+> location» می‌دهد)، فایل‌های `rf-detr-small.pth` و `rf-detr-base.pth` را از یک سیستم دیگر
+> با `-ModelsFrom` بدهید؛ اعتبار فایل با MD5 بررسی می‌شود.
+
+کل پوشه را (معمولاً ۴ تا ۵ گیگابایت) با فلش/شبکه به ماشین **آفلاین** ببرید و آنجا
+اجرا کنید:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install_offline.ps1
-# اختیاری: -Port 8080   -Start
+# اختیاری:
+#   -Port 8080            پورت دیگر
+#   -Lan                  دسترسی از دستگاه‌های شبکه + قانون فایروال (Administrator)
+#   -Autostart            اجرای خودکار در ورود کاربر (Administrator)
+#   -Start                اجرای سرور بلافاصله پس از نصب
 ```
 
-اسکریپت نصب، محیط مجازی را می‌سازد، بسته‌ها را با `--no-index --find-links` از
-فایل‌های محلی نصب می‌کند، وزن‌ها و رابط کاربری را سر جای خود کپی می‌کند، جداول
-پایگاه داده را می‌سازد و در پایان سلامت سامانه را گزارش می‌دهد.
+ماشین مقصد فقط به **Python 3.11** نیاز دارد (Node.js لازم نیست، چون `dist` آماده است
+و فونت هم داخل باندل است). اسکریپت نصب:
+
+1. محیط مجازی `backend\.venv` را می‌سازد و همه بسته‌ها را با
+   `--no-index --find-links` از فایل‌های محلی نصب می‌کند (هیچ درخواستی به اینترنت نمی‌رود)،
+2. وزن مدل‌ها، `ffmpeg`/`ffprobe` و رابط کاربری را کپی می‌کند،
+3. `backend\.env` را با مسیرهای محلی می‌سازد (اگر نبود)،
+4. جداول پایگاه داده را می‌سازد و سلامت (FastAPI/PyTorch/CUDA/RF-DETR) را گزارش می‌دهد،
+5. فایل `start_camerasmart.bat` را می‌سازد.
+
+در اولین بازدید مرورگر، رمز ادمین را دو بار تعیین کنید.
 
 ---
 
