@@ -339,6 +339,16 @@ class CameraManager:
         self._detector_errors.clear()
         self.heatmap.clear()
 
+    def refresh_metadata(self, camera: Camera) -> bool:
+        """Apply display-only changes (name) without restarting the stream."""
+        config = self._configs.get(camera.id)
+        stream = self._streams.get(camera.id)
+        if config is None or stream is None:
+            return False
+        config.name = camera.name
+        stream.config.name = camera.name
+        return True
+
     def remove_camera(self, camera_id: int) -> None:
         stream = self._streams.pop(camera_id, None)
         if stream is not None:

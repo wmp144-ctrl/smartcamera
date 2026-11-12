@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.security import has_url_credentials, mask_url_credentials
 from app.models.camera import DEFAULT_CLASS_CONFIG, DEFAULT_RECONNECT_POLICY
 from app.schemas.common import ORMModel
 
@@ -34,11 +35,13 @@ class CameraBase(BaseModel):
     rtsp_url: str = Field(min_length=1)
     enabled: bool = True
     transport: Literal["tcp", "udp"] = "tcp"
-    fps: int = Field(default=20, ge=1, le=60)
+    # ``None`` means "use CAMERASMART_DEFAULT_STREAM_FPS" (applied on create).
+    fps: int | None = Field(default=None, ge=1, le=60)
     detection_fps: float = Field(default=5.0, gt=0, le=60)
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
-    model_name: str = "rf-detr-base"
+    # ``None`` means "use CAMERASMART_DEFAULT_MODEL" (applied on create).
+    model_name: str | None = None
     model_weights: str | None = None
     detection_enabled: bool = False
     motion_sensitivity: float = Field(default=0.004, ge=0.0, le=1.0)
@@ -105,7 +108,9 @@ class CameraRead(ORMModel):
     id: int
     name: str
     location: str | None
+    #: Credentials embedded in the URL are redacted for every client.
     rtsp_url: str
+    has_credentials: bool = False
     enabled: bool
     transport: str
     fps: int
@@ -123,6 +128,13 @@ class CameraRead(ORMModel):
     reconnect_policy: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def _redact_url(self):
+        url = self.rtsp_url or ""
+        self.has_credentials = has_url_credentials(url)
+        self.rtsp_url = mask_url_credentials(url)
+        return self
 
 
 class CameraStatus(BaseModel):

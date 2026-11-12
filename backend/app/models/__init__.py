@@ -18,6 +18,7 @@ from app.models.detection import (
 )
 from app.models.system import (
     CAMERA_STATES,
+    AdminCredential,
     Alert,
     HealthMetric,
     HeatmapCell,
@@ -43,5 +44,6 @@ __all__ = [
     "HealthMetric",
     "HeatmapCell",
     "Setting",
+    "AdminCredential",
     "CAMERA_STATES",
 ]

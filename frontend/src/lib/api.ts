@@ -57,7 +57,9 @@ export interface Camera {
   id: number;
   name: string;
   location: string | null;
+  /** Credentials are redacted server-side (``rtsp://***@host/path``). */
   rtsp_url: string;
+  has_credentials: boolean;
   enabled: boolean;
   transport: "tcp" | "udp";
   fps: number;
@@ -421,6 +423,13 @@ export interface AvailableModels {
   device: string;
 }
 
+export interface AuthStatus {
+  configured: boolean;
+  authenticated: boolean;
+  detail: string;
+  session_hours: number;
+}
+
 export interface WsMessage<T = Record<string, unknown>> {
   type: "hello" | "ping" | "message";
   topic?: string;
@@ -478,6 +487,8 @@ async function request<T>(
     method,
     headers: { Accept: "application/json" },
     signal: options.signal,
+    // The admin session lives in an HttpOnly cookie on this origin.
+    credentials: "same-origin",
   };
   if (options.body !== undefined) {
     init.headers = { ...init.headers, "Content-Type": "application/json" };
@@ -498,6 +509,11 @@ async function request<T>(
   const data = text ? safeJson(text) : null;
 
   if (!response.ok) {
+    // A lost/expired session must send the operator back to the login screen
+    // instead of leaving every panel showing "server error".
+    if (response.status === 401 && !path.startsWith("/api/auth/")) {
+      window.dispatchEvent(new Event("camerasmart:unauthorized"));
+    }
     const detail =
       (data && typeof data === "object" && "detail" in data && typeof data.detail === "string"
         ? data.detail
@@ -537,6 +553,20 @@ export interface WindowParams {
 }
 
 export const api = {
+  auth: {
+    status: () => get<AuthStatus>("/api/auth/status"),
+    setup: (password: string, confirm: string) =>
+      post<AuthStatus>("/api/auth/setup", { password, confirm }),
+    login: (password: string) => post<AuthStatus>("/api/auth/login", { password }),
+    logout: () => post<{ ok: boolean; detail?: string }>("/api/auth/logout"),
+    changePassword: (currentPassword: string, newPassword: string, confirm: string) =>
+      post<AuthStatus>("/api/auth/password", {
+        current_password: currentPassword,
+        new_password: newPassword,
+        confirm,
+      }),
+  },
+
   cameras: {
     list: (params?: { enabled?: boolean; search?: string }) =>
       get<Camera[]>("/api/cameras", params),

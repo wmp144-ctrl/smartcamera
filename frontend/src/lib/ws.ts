@@ -121,6 +121,13 @@ class EventStream {
     this.socket = null;
     this.setState("closed");
   }
+
+  /** Stop retrying (used when the session is gone, e.g. after a logout). */
+  disconnect(): void {
+    this.listeners.clear();
+    this.stateListeners.clear();
+    this.close();
+  }
 }
 
 export const eventStream = new EventStream();

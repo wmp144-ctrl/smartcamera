@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.core.timeutil import utcnow
 from tests.factories import seed_camera, seed_track
 
 
@@ -159,7 +160,9 @@ async def test_retention_dry_run_then_delete(client, session) -> None:
 
 async def test_retention_keeps_recent_data(client, session) -> None:
     camera = await seed_camera(session)
-    await seed_track(session, camera, frames=4)
+    # 30 days is a *relative* cutoff, so this data has to be recent relative to
+    # now (the shared BASE_TIME would fall outside the window).
+    await seed_track(session, camera, frames=4, base_time=utcnow())
     await client.post("/api/system/retention/run", json={"days": 30})
     assert (await client.get("/api/objects")).json()["total"] == 1
 

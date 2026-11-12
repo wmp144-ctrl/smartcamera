@@ -10,6 +10,20 @@ import pytest
 from starlette.testclient import TestClient
 
 from app.services.bus import TOPIC_ALERT, TOPIC_EVENT, TOPIC_STATUS, EventBus, bus
+from tests.conftest import ADMIN_PASSWORD
+
+
+def authenticate(client: TestClient) -> None:
+    """Set up or log in the admin; TestClient keeps the session cookie."""
+    status = client.get("/api/auth/status").json()
+    if not status["configured"]:
+        response = client.post(
+            "/api/auth/setup",
+            json={"password": ADMIN_PASSWORD, "confirm": ADMIN_PASSWORD},
+        )
+    else:
+        response = client.post("/api/auth/login", json={"password": ADMIN_PASSWORD})
+    assert response.status_code == 200, response.text
 
 
 # --------------------------------------------------------------------------
@@ -106,6 +120,7 @@ def test_websocket_handshake_and_live_message() -> None:
     from app.main import app
 
     with TestClient(app) as client:
+        authenticate(client)
         with client.websocket_connect("/api/ws/events?topics=event,alert") as socket:
             hello = socket.receive_json()
             assert hello["type"] == "hello"
@@ -138,6 +153,7 @@ def test_websocket_defaults_to_all_topics() -> None:
     from app.main import app
 
     with TestClient(app) as client:
+        authenticate(client)
         with client.websocket_connect("/api/ws/events") as socket:
             hello = socket.receive_json()
             assert set(hello["topics"]) >= {"event", "alert", "status", "detection"}
@@ -147,6 +163,7 @@ def test_websocket_info_endpoint() -> None:
     from app.main import app
 
     with TestClient(app) as client:
+        authenticate(client)
         response = client.get("/api/ws/info")
         assert response.status_code == 200
         body = response.json()
@@ -159,6 +176,7 @@ def test_websocket_topic_selection(topics) -> None:
     from app.main import app
 
     with TestClient(app) as client:
+        authenticate(client)
         with client.websocket_connect(f"/api/ws/events?topics={topics}") as socket:
             hello = socket.receive_json()
             assert hello["topics"] == topics.split(",")

@@ -65,8 +65,6 @@ class Settings(BaseSettings):
     require_motion_for_detection: bool = True
     # GPU device for RF-DETR: "cuda", "cuda:0" or "cpu".
     device: str = "cuda"
-    # Frames kept in the per-camera live ring buffer (for the MJPEG/live view).
-    live_buffer_size: int = 8
     jpeg_quality: int = 80
     # Live-view JPEGs are downscaled to this width to keep many cameras cheap.
     live_max_width: int = 1280
@@ -92,6 +90,13 @@ class Settings(BaseSettings):
     retention_interval_hours: float = 24.0
     heatmap_grid_w: int = 64
     heatmap_grid_h: int = 36
+
+    # --- authentication -------------------------------------------------------
+    #: How long a browser session stays valid after login.
+    session_hours: float = 12.0
+    #: Failed password attempts per client before a temporary lockout.
+    auth_max_attempts: int = 5
+    auth_lockout_seconds: float = 60.0
 
     # --- alerts -------------------------------------------------------------
     alerts_enabled: bool = True

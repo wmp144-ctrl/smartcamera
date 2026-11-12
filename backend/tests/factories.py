@@ -15,6 +15,10 @@ from app.services.pipeline import DetectionPipeline, PipelineConfig, ZoneSpec
 from app.services.tracker import Detection
 
 WIDTH, HEIGHT = 320, 180
+#: Fixed anchor for deterministic time-window assertions (many tests query
+#: explicit 2026-10-05 ranges). Tests that assert *relative* windows ("/api/stats/
+#: cameras", a 30-day retention run) must pass ``base_time=utcnow()`` instead of
+#: relying on this date, otherwise they start failing as real time moves on.
 BASE_TIME = datetime(2026, 10, 5, 8, 0, tzinfo=timezone.utc)
 
 

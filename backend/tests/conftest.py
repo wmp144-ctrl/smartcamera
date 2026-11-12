@@ -26,6 +26,9 @@ import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 
+#: Password used by the test-suite for the single admin account.
+ADMIN_PASSWORD = "test-admin-password"
+
 from app.core import database  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 from app.models import Base  # noqa: E402
@@ -74,10 +77,33 @@ async def session(prepared_db):  # noqa: ARG001
         await db.rollback()
 
 
+async def login_admin(http: AsyncClient) -> None:
+    """Configure (first run) or log in the admin so the client holds a cookie."""
+    status = (await http.get("/api/auth/status")).json()
+    if not status["configured"]:
+        response = await http.post(
+            "/api/auth/setup",
+            json={"password": ADMIN_PASSWORD, "confirm": ADMIN_PASSWORD},
+        )
+    else:
+        response = await http.post("/api/auth/login", json={"password": ADMIN_PASSWORD})
+    assert response.status_code == 200, response.text
+
+
 @pytest_asyncio.fixture
-async def client(prepared_db):  # noqa: ARG001
+async def anonymous_client(prepared_db):  # noqa: ARG001
+    """A client that is *not* logged in (for auth tests)."""
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as http:
+        yield http
+
+
+@pytest_asyncio.fixture
+async def client(prepared_db):  # noqa: ARG001
+    """An authenticated client: the whole API now requires the admin session."""
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as http:
+        await login_admin(http)
         yield http
 
 

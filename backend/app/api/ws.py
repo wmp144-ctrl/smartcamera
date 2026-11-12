@@ -8,6 +8,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.config import settings
+from app.core.security import SESSION_COOKIE, is_allowed_origin, signer
 from app.core.timeutil import jalali_datetime_label, utcnow
 from app.services.bus import ALL_TOPICS, bus
 
@@ -19,6 +20,14 @@ HEARTBEAT_SECONDS = 20.0
 
 @router.websocket("/api/ws/events")
 async def events_socket(websocket: WebSocket) -> None:
+    # WebSocket handshakes are not covered by the SameSite cookie rule, so the
+    # session and the Origin are both checked here before accepting.
+    if not is_allowed_origin(websocket):
+        await websocket.close(code=1008, reason="origin not allowed")
+        return
+    if not signer.verify(websocket.cookies.get(SESSION_COOKIE)):
+        await websocket.close(code=1008, reason="authentication required")
+        return
     await websocket.accept()
     # Bind the bus to this loop so detector threads can publish safely even if
     # the camera manager did not start (e.g. embedded/test deployments).

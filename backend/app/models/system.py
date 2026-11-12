@@ -107,6 +107,24 @@ class HeatmapCell(Base):
     )
 
 
+class AdminCredential(TimestampMixin, Base):
+    """The single administrator password (there is no user management).
+
+    ``session_secret`` signs the session cookie; changing the password rotates
+    it, which signs out every existing browser session.
+    """
+
+    __tablename__ = "admin_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    salt: Mapped[str] = mapped_column(String(128), nullable=False)
+    #: ``scrypt:<n>:<r>:<p>`` so the cost can be raised without a migration.
+    params: Mapped[str] = mapped_column(String(64), default="scrypt:16384:8:1", nullable=False)
+    session_secret: Mapped[str] = mapped_column(String(128), nullable=False)
+    password_changed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
 class Setting(TimestampMixin, Base):
     """Simple key/value application settings (JSON values)."""
 

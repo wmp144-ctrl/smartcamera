@@ -1,7 +1,22 @@
-import { Activity, Bell, Cpu, Menu, Moon, Sun, Volume2, VolumeX, Wifi, WifiOff } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  Activity,
+  Bell,
+  Cpu,
+  LogOut,
+  Menu,
+  Moon,
+  Sun,
+  Volume2,
+  VolumeX,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { api } from "../../lib/api";
 import { useGPU } from "../../lib/queries";
+import { eventStream } from "../../lib/ws";
 import { faNumber, formatRelative, severityTone, toFaDigits } from "../../lib/utils";
 import {
   JALALI_WEEKDAYS,
@@ -208,6 +223,8 @@ export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {
   const volume = useUI((state) => state.volume);
   const setVolume = useUI((state) => state.setVolume);
   const connection = useLive((state) => state.connection);
+  const queryClient = useQueryClient();
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const connectionIcon = useMemo(
     () => (connection === "open" ? <Wifi className="size-3" /> : <WifiOff className="size-3" />),
@@ -266,6 +283,27 @@ export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {
           }}
         >
           {theme === "dark" ? <Sun /> : <Moon />}
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="خروج از حساب"
+          title="خروج"
+          loading={loggingOut}
+          onClick={async () => {
+            setLoggingOut(true);
+            try {
+              await api.auth.logout();
+            } finally {
+              eventStream.disconnect();
+              queryClient.clear();
+              window.dispatchEvent(new Event("camerasmart:unauthorized"));
+              setLoggingOut(false);
+            }
+          }}
+        >
+          <LogOut />
         </Button>
       </div>
     </header>

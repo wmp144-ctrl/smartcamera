@@ -13,11 +13,54 @@ import logging
 import numpy as np
 import pytest
 
-from app.services.detector import NullDetector, RFDetrDetector, build_detector
+from app.services.detector import (
+    NullDetector,
+    RFDetrDetector,
+    build_detector,
+    parse_raw_output,
+)
 
 
 def frame() -> np.ndarray:
     return np.zeros((64, 64, 3), dtype=np.uint8)
+
+
+class _StubDetections:
+    """Shape of ``supervision.Detections`` as returned by ``rfdetr.predict``.
+
+    Pretrained COCO checkpoints report category ids (person = 1, bus = 6) and
+    attach the resolved names in ``data['class_name']``.
+    """
+
+    def __init__(self, boxes, scores, class_ids, names) -> None:
+        self.xyxy = np.asarray(boxes, dtype=float)
+        self.confidence = np.asarray(scores, dtype=float)
+        self.class_id = np.asarray(class_ids, dtype=int)
+        self.data = {"class_name": np.asarray(names)}
+
+
+def test_parse_raw_output_prefers_reported_class_names() -> None:
+    raw = _StubDetections(
+        boxes=[[10, 10, 50, 90], [60, 40, 140, 120]],
+        scores=[0.95, 0.88],
+        class_ids=[1, 6],
+        names=["person", "bus"],
+    )
+    detections = parse_raw_output(raw, 200, 200)
+    assert [item.object_type for item in detections] == ["person", "bus"]
+    # Boxes stay normalised to the frame they came from.
+    assert detections[0].bbox == pytest.approx([0.05, 0.05, 0.25, 0.45])
+
+
+def test_parse_raw_output_falls_back_to_zero_based_ids() -> None:
+    raw = _StubDetections(
+        boxes=[[0, 0, 10, 10]],
+        scores=[0.9],
+        class_ids=[1],
+        names=[""],  # no resolved name -> numeric fallback (0-based list)
+    )
+    detections = parse_raw_output(raw, 10, 10)
+    assert [item.object_type for item in detections] == ["bicycle"]
 
 
 def test_detect_does_not_retry_a_failed_load(monkeypatch) -> None:

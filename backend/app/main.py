@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import alerts as alerts_api
+from app.api import auth as auth_api
 from app.api import cameras as cameras_api
 from app.api import events as events_api
 from app.api import objects as objects_api
@@ -24,7 +25,9 @@ from app.api import ws as ws_api
 from app.core.config import settings
 from app.core.database import dispose_engine, init_models, session_scope
 from app.core.logging import setup_logging
+from app.core.middleware import AdminAuthMiddleware
 from app.core.timeutil import jalali_label, to_local, utcnow
+from app.services import auth as auth_service
 from app.services.camera_manager import manager
 from app.services.retention import apply_retention
 
@@ -46,6 +49,16 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             await init_models()
         except Exception:  # noqa: BLE001 - surface but do not crash at boot
             logger.exception("could not create the database schema")
+
+    try:
+        async with session_scope() as session:
+            configured = await auth_service.load_signer(session)
+        logger.info(
+            "admin authentication: %s",
+            "enabled" if configured else "setup required on first visit",
+        )
+    except Exception:  # noqa: BLE001 - never stop the app over a credentials read
+        logger.exception("could not load the admin credentials")
 
     if settings.autostart_cameras:
         try:
@@ -136,15 +149,24 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
     )
 
+    # A wildcard origin cannot be combined with credentials (browsers reject
+    # that combination), so a wildcard deployment simply drops cookie CORS and
+    # relies on the same-origin UI.
+    origins = [origin.strip() for origin in settings.cors_origins if origin and origin.strip()]
+    allow_any_origin = not origins or "*" in origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins or ["*"],
-        allow_credentials=True,
+        allow_origins=["*"] if allow_any_origin else origins,
+        allow_credentials=not allow_any_origin,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Runs outermost so an unauthenticated call never reaches a router (or the
+    # ``/media`` mount, which would otherwise serve every stored image).
+    app.add_middleware(AdminAuthMiddleware)
 
     for router in (
+        auth_api.router,
         cameras_api.router,
         objects_api.router,
         events_api.router,

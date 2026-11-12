@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app.api.deps import CameraDep, SessionDep
 from app.core.config import settings
+from app.core.security import is_masked_url
 from app.core.timeutil import utcnow
 from app.models.camera import Camera, Zone
 from app.models.system import HealthMetric
@@ -38,6 +39,32 @@ router = APIRouter(prefix="/api/cameras", tags=["cameras"])
 
 BOUNDARY = "camerasmartframe"
 
+#: Fields whose change requires restarting the decoder/detector. Everything else
+#: (name, location, notes) is applied in place so editing a note does not
+#: interrupt the live view.
+STREAM_FIELDS = frozenset(
+    {
+        "rtsp_url",
+        "enabled",
+        "transport",
+        "fps",
+        "detection_fps",
+        "width",
+        "height",
+        "model_name",
+        "model_weights",
+        "detection_enabled",
+        "motion_sensitivity",
+        "record_objects",
+        "record_snapshots",
+        "class_config",
+        "reconnect_policy",
+    }
+)
+
+#: Nullable columns: an explicit ``null`` here is meaningful.
+NULLABLE_FIELDS = frozenset({"location", "notes", "width", "height", "model_weights"})
+
 
 # --------------------------------------------------------------------------
 # CRUD
@@ -61,8 +88,15 @@ async def list_cameras(
 
 @router.post("", response_model=CameraWithZones, status_code=status.HTTP_201_CREATED)
 async def create_camera(payload: CameraCreate, session: SessionDep) -> Camera:
+    data = payload.model_dump(exclude={"class_config", "reconnect_policy"})
+    # ``CAMERASMART_DEFAULT_MODEL`` / ``_STREAM_FPS`` are the documented defaults
+    # for a new camera; the schema leaves them unset so these actually apply.
+    if not data.get("model_name"):
+        data["model_name"] = settings.default_model
+    if not data.get("fps"):
+        data["fps"] = settings.default_stream_fps
     camera = Camera(
-        **payload.model_dump(exclude={"class_config", "reconnect_policy"}),
+        **data,
         class_config={key: rule_as_dict(rule) for key, rule in payload.class_config.items()},
         reconnect_policy=rule_as_dict(payload.reconnect_policy),
     )
@@ -87,6 +121,15 @@ async def update_camera(
     camera: CameraDep, payload: CameraUpdate, session: SessionDep
 ) -> Camera:
     data = payload.model_dump(exclude_unset=True)
+    # The API never hands out real camera credentials, so an unchanged URL comes
+    # back redacted. Keeping the stored value makes editing name/notes safe.
+    if data.get("rtsp_url") and is_masked_url(data["rtsp_url"]):
+        data.pop("rtsp_url")
+    data = {
+        key: value
+        for key, value in data.items()
+        if value is not None or key in NULLABLE_FIELDS or key in {"class_config", "reconnect_policy"}
+    }
     if data.get("class_config") is not None:
         data["class_config"] = {
             key: rule_as_dict(rule) for key, rule in data["class_config"].items()
@@ -98,7 +141,11 @@ async def update_camera(
         setattr(camera, field, value)
     await session.commit()
     await session.refresh(camera)
-    await manager.reload_camera(camera.id)
+    if set(data) & STREAM_FIELDS:
+        await manager.reload_camera(camera.id)
+    else:
+        # Presentation-only edit: never restart the stream for it.
+        manager.refresh_metadata(camera)
     return camera
 
 

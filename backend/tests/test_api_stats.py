@@ -56,7 +56,9 @@ async def test_overview_reports_camera_state(client, session) -> None:
 
 async def test_per_camera_stats(client, session) -> None:
     camera = await seed_camera(session)
-    await seed_track(session, camera, frames=5)
+    # This endpoint reports a *relative* window (last 7 days), so the seeded
+    # track is anchored to now rather than to the shared fixed test date.
+    await seed_track(session, camera, frames=5, base_time=utcnow())
     body = (await client.get("/api/stats/cameras")).json()
     assert len(body) == 1
     assert body[0]["total_tracks"] == 1
