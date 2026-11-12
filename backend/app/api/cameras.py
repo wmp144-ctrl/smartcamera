@@ -409,7 +409,11 @@ async def list_zones(camera: CameraDep) -> list[Zone]:
 async def create_zone(
     camera: CameraDep, payload: ZoneCreate, session: SessionDep
 ) -> Zone:
-    zone = Zone(camera_id=camera.id, **payload.model_dump(exclude={"camera_id"}))
+    data = payload.model_dump(exclude={"camera_id"})
+    if "alert_sound" not in payload.model_fields_set:
+        # The global default is otherwise never read: honour it for new zones.
+        data["alert_sound"] = settings.alert_sound_default
+    zone = Zone(camera_id=camera.id, **data)
     session.add(zone)
     await session.commit()
     await session.refresh(zone)

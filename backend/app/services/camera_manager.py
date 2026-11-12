@@ -124,6 +124,9 @@ class CameraManager:
         self._streams: dict[int, CameraStream] = {}
         self._configs: dict[int, CameraRuntimeConfig] = {}
         self._persisters: dict[int, Persister] = {}
+        #: camera id -> (exists, checked_at). A removed camera whose stream is
+        #: still draining results used to recreate rows for a dead camera id.
+        self._camera_cache: dict[int, tuple[bool, float]] = {}
         self._queue: queue.Queue[tuple[CameraRuntimeConfig, PipelineResult]] = queue.Queue(
             maxsize=settings.result_queue_size
         )
@@ -537,6 +540,10 @@ class CameraManager:
         A transient SQLite lock (another process or an API write committing in
         between) is retried instead of dropping the frames on the floor.
         """
+        if not await self._camera_exists(config.id):
+            logger.info("dropping queued results for deleted camera %s", config.id)
+            self._persisters.pop(config.id, None)
+            return
         persister = self._persisters.setdefault(config.id, Persister())
         pipeline_config = config.to_pipeline_config()
         outcomes: list[tuple[PipelineResult, PersistOutcome]] = []
@@ -565,6 +572,19 @@ class CameraManager:
         # event that was rolled back.
         for result, outcome in outcomes:
             self._publish_outcome(config, result, outcome)
+
+    async def _camera_exists(self, camera_id: int) -> bool:
+        """Whether the camera row still exists (cached for a few seconds)."""
+        now = time.monotonic()
+        cached = self._camera_cache.get(camera_id)
+        if cached is not None and now - cached[1] < 5.0:
+            return cached[0]
+        async with session_scope() as session:
+            exists = (
+                await session.execute(select(Camera.id).where(Camera.id == camera_id))
+            ).scalar() is not None
+        self._camera_cache[camera_id] = (exists, now)
+        return exists
 
     def _publish_outcome(
         self, config: CameraRuntimeConfig, result: PipelineResult, outcome: PersistOutcome

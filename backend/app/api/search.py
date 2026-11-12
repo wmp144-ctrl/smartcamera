@@ -12,9 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
 from app.core.timeutil import jalali_datetime_label
-from app.models.detection import TrackRecord
 from app.schemas.detection import SpatialSearchRequest, SpatialSearchResult
-from app.services.geometry import direction_label_fa, point_in_polygon
+from app.services.geometry import direction_label_fa
 from app.services.models_registry import class_label
 from app.services.search import build_details, query_tracks
 
@@ -162,8 +161,3 @@ async def point_query(
         ],
     }
 
-
-def _contains(track: TrackRecord, polygon: list[list[float]] | None) -> bool:
-    if not polygon or track.center_x is None:
-        return True
-    return point_in_polygon((track.center_x, track.center_y or 0.0), polygon)

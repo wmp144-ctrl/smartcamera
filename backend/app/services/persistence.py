@@ -20,6 +20,7 @@ from app.models.camera import Zone
 from app.models.detection import Event, ObjectImage, TrackRecord
 from app.models.system import Alert
 from app.services.alerts import AlertDecision
+from app.services.bus import bus
 from app.services.geometry import box_center
 from app.services.pipeline import PipelineConfig, PipelineResult, SnapshotRequest, TrackSnapshot
 from app.services.storage import SavedImages, delete_relative, save_object_images
@@ -35,6 +36,12 @@ def materialize_snapshots(config: PipelineConfig, result: PipelineResult) -> int
     Returns the number of images written.
     """
     written = 0
+    if not config.record_objects:
+        # The operator turned object image storage off: release the frames
+        # without touching the disk (the persistence step drops the requests).
+        for request in result.snapshots:
+            request.frame = None
+        return 0
     for request in result.snapshots:
         if request.saved is not None or request.frame is None:
             continue
@@ -50,7 +57,7 @@ def materialize_snapshots(config: PipelineConfig, result: PipelineResult) -> int
                 best=request.best,
             )
             written += 1
-        except Exception as exc:  # noqa: BLE001 - never kill the video thread
+        except Exception as exc:
             logger.warning("snapshot materialisation failed: %s", exc)
         finally:
             request.frame = None
@@ -157,14 +164,14 @@ class Persister:
         # 2) images ---------------------------------------------------------
         images_by_track: dict[int, list[ObjectImage]] = defaultdict(list)
         for request in result.snapshots:
-            if not config.record_snapshots:
+            if not config.record_snapshots or not config.record_objects:
                 break
             track_id = self.track_map.get(request.runtime_track_id)
             if track_id is None:
                 continue
             try:
                 image = await self._save_image(session, config, track_id, request)
-            except Exception as exc:  # noqa: BLE001 - one bad frame must not stop the pipeline
+            except Exception as exc:
                 logger.warning("failed to save snapshot: %s", exc)
                 outcome.errors.append(f"snapshot: {exc}")
                 continue
@@ -218,6 +225,9 @@ class Persister:
         await session.flush()
 
         # 5) alerts ---------------------------------------------------------
+        # ``delivered`` records whether a dashboard was actually listening, so
+        # the flag stops being permanently false in the API responses.
+        listeners = bus.subscriber_count > 0
         for decision in result.alerts:
             event = self._matching_event(outcome.events, decision)
             alert = Alert(
@@ -231,6 +241,8 @@ class Persister:
                 object_type=decision.object_type,
                 triggered_at=event.occurred_at if event is not None else utcnow(),
                 sound=decision.sound,
+                delivered=listeners,
+                delivered_at=utcnow() if listeners else None,
                 meta={"event_type": event.event_type if event is not None else "detection"},
             )
             session.add(alert)
@@ -422,7 +434,7 @@ class Persister:
             session, track_id, keep=lambda rows: {r.id for r in rows if r.kind not in kinds}
         )
 
-    async def _delete_images(self, session: AsyncSession, track_id: int, keep) -> int:  # noqa: ANN001
+    async def _delete_images(self, session: AsyncSession, track_id: int, keep) -> int:
         rows = list(
             (
                 await session.execute(select(ObjectImage).where(ObjectImage.track_id == track_id))

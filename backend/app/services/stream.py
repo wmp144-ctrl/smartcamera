@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from urllib.parse import unquote, urlparse
@@ -39,6 +40,12 @@ DEFAULT_HEIGHT = 720
 #: JPEGs. Nobody watching (headless/kiosk, closed browser tab) must not burn a
 #: core per camera on JPEG encoding.
 LIVE_IDLE_GRACE_SECONDS = 3.0
+
+#: JPEG/PNG encoding for stored snapshots is CPU work that used to run on the
+#: decode thread, delaying the next frame (and the live view) by ~20-40 ms per
+#: object entering the scene. One background worker keeps that work off the
+#: video path while preserving the frame order of every camera.
+_SNAPSHOT_WRITER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="snapshot-writer")
 
 #: How long ``start()`` waits for a decode thread a previous ``stop()`` could not
 #: finish joining (a reader blocked in a socket read returns after ``-rw_timeout``).
@@ -506,6 +513,10 @@ class CameraStream:
         self.on_state_change = on_state_change
         self._reader_factory = reader_factory
         self.health = StreamHealth(state="disabled" if not config.enabled else "unknown")
+        #: ffprobe costs a full RTSP handshake (up to 15 s against a dead host),
+        #: and ``_build_reader`` runs on every reconnect. Probe once per URL.
+        self._probe_url: str | None = None
+        self._probe: StreamProbe | None = None
         self._thread: threading.Thread | None = None
         #: Threads a previous ``stop()`` could not join in time (a reader can sit
         #: inside a bounded socket read for a few seconds). They are joined by
@@ -690,7 +701,13 @@ class CameraStream:
             # Detection is off for this camera: holding the model would keep VRAM
             # busy for a camera that is not allowed to detect anything.
             self.drop_pipeline()
-        self.health = StreamHealth(state="disabled" if not config.enabled else "unknown")
+        # Keep the counters (frames, detections, reconnects, drops): a settings
+        # save must not make the health panel look like a fresh boot. Only the
+        # volatile values are reset.
+        self.health.state = "disabled" if not config.enabled else "unknown"
+        self.health.message = None
+        self.health.fps = 0.0
+        self.health.detection_fps = 0.0
         self._backoff = 1.0
         if was_running or config.enabled:
             self.start()
@@ -699,7 +716,10 @@ class CameraStream:
     def _build_reader(self):  # noqa: ANN201
         if self._reader_factory is not None:
             return self._reader_factory(self.config)
-        probe = probe_stream(self.config.rtsp_url)
+        if self._probe_url != self.config.rtsp_url:
+            self._probe = probe_stream(self.config.rtsp_url)
+            self._probe_url = self.config.rtsp_url
+        probe = self._probe
         width = self.config.width or (probe.width if probe else None) or DEFAULT_WIDTH
         height = self.config.height or (probe.height if probe else None) or DEFAULT_HEIGHT
         scale = probe is None or bool(self.config.width and self.config.width != probe.width)
@@ -865,16 +885,35 @@ class CameraStream:
         with self._lock:
             self._detections = boxes
 
+        callback = self.on_result
+        deliver = callback is not None and bool(
+            result.events or result.snapshots or result.active_tracks
+        )
+
         if result.snapshots:
-            # Write the images here, on the video thread, so the queue carries
-            # metadata only and the frame buffers are released immediately.
-            from app.services.persistence import materialize_snapshots  # noqa: PLC0415
+            # Encoding and writing the images is offloaded to a single worker so
+            # the decoder thread continues with the next frame. The result is
+            # forwarded from that worker to keep the image and its metadata in
+            # one order for the persistence task.
+            pipeline_config = self.pipeline.config
+            camera = self.config
 
-            materialize_snapshots(self.pipeline.config, result)
+            def write_and_forward() -> None:
+                from app.services.persistence import materialize_snapshots  # noqa: PLC0415
 
-        if self.on_result is not None and (result.events or result.snapshots or result.active_tracks):
+                materialize_snapshots(pipeline_config, result)
+                if deliver:
+                    try:
+                        callback(camera, result)  # type: ignore[misc]
+                    except Exception:  # noqa: BLE001
+                        logger.exception("result callback failed for camera %s", camera.id)
+
+            _SNAPSHOT_WRITER.submit(write_and_forward)
+            return
+
+        if deliver:
             try:
-                self.on_result(self.config, result)
+                callback(self.config, result)  # type: ignore[misc]
             except Exception:  # noqa: BLE001
                 logger.exception("result callback failed for camera %s", self.config.id)
 

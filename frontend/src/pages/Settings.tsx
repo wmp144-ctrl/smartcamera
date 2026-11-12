@@ -15,6 +15,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { SecuritySettings } from "../components/SecuritySettings";
 import { Badge, StatusDot } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardBody, CardHeader, PageHeader } from "../components/ui/card";
@@ -452,6 +453,8 @@ export function SettingsPage() {
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
+        <SecuritySettings />
+
         <Card>
           <CardHeader title="تنظیمات ذخیره‌شده در پایگاه داده" icon={<Save />} />
           <CardBody className="space-y-3">

@@ -17,6 +17,10 @@ from app.services.storage import delete_relative
 
 logger = logging.getLogger(__name__)
 
+#: Deleting in bounded batches keeps a first run on an old database from loading
+#: every image/event row into memory before writing anything.
+RETENTION_CHUNK = 500
+
 
 @dataclass
 class RetentionReport:
@@ -46,6 +50,11 @@ class RetentionReport:
         }
 
 
+async def _count(session: AsyncSession, model, condition) -> int:
+    total = await session.execute(select(func.count()).select_from(model).where(condition))
+    return int(total.scalar() or 0)
+
+
 async def apply_retention(
     session: AsyncSession, days: int | None = None, *, dry_run: bool = False
 ) -> RetentionReport:
@@ -53,45 +62,58 @@ async def apply_retention(
     cutoff = utcnow() - timedelta(days=max(1, days))
     report = RetentionReport(days=days, cutoff=cutoff.isoformat(), dry_run=dry_run)
 
-    image_stmt = select(ObjectImage).where(ObjectImage.captured_at < cutoff)
-    images = (await session.execute(image_stmt)).scalars().all()
-    report.images_deleted = len(images)
+    image_filter = ObjectImage.captured_at < cutoff
+    if dry_run:
+        report.images_deleted = await _count(session, ObjectImage, image_filter)
+    else:
+        while True:
+            images = (
+                await session.execute(
+                    select(ObjectImage).where(image_filter).limit(RETENTION_CHUNK)
+                )
+            ).scalars().all()
+            if not images:
+                break
+            for image in images:
+                for path in (image.full_path, image.crop_path, image.thumb_path):
+                    if delete_relative(path):
+                        report.files_deleted += 1
+                await session.delete(image)
+            await session.flush()
+            report.images_deleted += len(images)
 
+    event_filter = Event.occurred_at < cutoff
+    if dry_run:
+        report.events_deleted = await _count(session, Event, event_filter)
+    else:
+        while True:
+            events = (
+                await session.execute(select(Event).where(event_filter).limit(RETENTION_CHUNK))
+            ).scalars().all()
+            if not events:
+                break
+            for event in events:
+                for path in (event.snapshot_full_path, event.snapshot_crop_path):
+                    if delete_relative(path):
+                        report.files_deleted += 1
+                await session.delete(event)
+            await session.flush()
+            report.events_deleted += len(events)
+
+    track_filter = TrackRecord.last_seen < cutoff
+    report.tracks_deleted = await _count(session, TrackRecord, track_filter)
     if not dry_run:
-        for image in images:
-            for path in (image.full_path, image.crop_path, image.thumb_path):
-                if delete_relative(path):
-                    report.files_deleted += 1
-            await session.delete(image)
-        await session.flush()
+        await session.execute(delete(TrackRecord).where(track_filter))
 
-    events_stmt = select(Event).where(Event.occurred_at < cutoff)
-    events = (await session.execute(events_stmt)).scalars().all()
-    report.events_deleted = len(events)
-    if not dry_run and events:
-        for event in events:
-            for path in (event.snapshot_full_path, event.snapshot_crop_path):
-                if delete_relative(path):
-                    report.files_deleted += 1
-        await session.execute(
-            delete(Event).where(Event.occurred_at < cutoff)
-        )
-
-    tracks_stmt = select(TrackRecord).where(TrackRecord.last_seen < cutoff)
-    tracks = (await session.execute(tracks_stmt)).scalars().all()
-    report.tracks_deleted = len(tracks)
-    if not dry_run and tracks:
-        await session.execute(delete(TrackRecord).where(TrackRecord.last_seen < cutoff))
-
-    alerts_stmt = select(Alert).where(Alert.triggered_at < cutoff)
-    report.alerts_deleted = len((await session.execute(alerts_stmt)).scalars().all())
+    alert_filter = Alert.triggered_at < cutoff
+    report.alerts_deleted = await _count(session, Alert, alert_filter)
     if not dry_run:
-        await session.execute(delete(Alert).where(Alert.triggered_at < cutoff))
+        await session.execute(delete(Alert).where(alert_filter))
 
-    health_stmt = select(HealthMetric).where(HealthMetric.recorded_at < cutoff)
-    report.health_deleted = len((await session.execute(health_stmt)).scalars().all())
+    health_filter = HealthMetric.recorded_at < cutoff
+    report.health_deleted = await _count(session, HealthMetric, health_filter)
     if not dry_run:
-        await session.execute(delete(HealthMetric).where(HealthMetric.recorded_at < cutoff))
+        await session.execute(delete(HealthMetric).where(health_filter))
 
     # Heatmap cells are bucketed by *local* day, so the cutoff is local too.
     # They used to be kept forever, which grew the table without bound.

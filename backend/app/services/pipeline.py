@@ -215,6 +215,11 @@ class DetectionPipeline:
 
     # -- configuration -----------------------------------------------------
     def rebuild_rules(self) -> None:
+        if not settings.alerts_enabled:
+            # Master switch in Settings: zone rules stay configured but produce
+            # no alerts (sirens/notifications off during e.g. maintenance).
+            self._alert_rules = []
+            return
         self._alert_rules = [
             AlertRule(
                 zone_id=zone.id,
