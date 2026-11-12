@@ -108,8 +108,12 @@ Write-Step "نصب بسته‌ها (کاملاً محلی، بدون اینتر�
 & $py -m pip install --no-index --find-links $wheels --upgrade pip setuptools wheel --quiet
 $requirements = Join-Path $offline "requirements-offline.txt"
 if (-not (Test-Path $requirements)) { $requirements = Join-Path $backend "requirements.txt" }
+# constraints بسته (نسخه‌های همان CUDA tag) بر constraints مخزن اولویت دارد
 $constraintsArgs = @()
-if (Test-Path (Join-Path $backend "constraints.txt")) {
+$bundleConstraints = Join-Path $offline "constraints-offline.txt"
+if (Test-Path $bundleConstraints) {
+    $constraintsArgs = @("-c", $bundleConstraints)
+} elseif (Test-Path (Join-Path $backend "constraints.txt")) {
     $constraintsArgs = @("-c", (Join-Path $backend "constraints.txt"))
 }
 & $py -m pip install --no-index --find-links $wheels -r $requirements @constraintsArgs

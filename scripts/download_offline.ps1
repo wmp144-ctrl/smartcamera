@@ -164,13 +164,17 @@ $pinLines = if ($repoRoot -and (Test-Path (Join-Path $repoRoot "backend\constrai
 } else {
     $embeddedPins
 }
-$pinLines = @($pinLines | Where-Object { $_ -notmatch '^(pytest|ruff)' })
-if ($CudaTag -ne "cu124") {
-    $pinLines = @($pinLines | Where-Object { $_ -notmatch '^torch(vision)?==' })
-}
-$reqFile = Join-Path $out "requirements-offline.txt"
+# نسخه torch با برچسب محلی همان ایندکس جفت می‌شود (۲٫۵٫۱+cu124 / +cu121 / +cpu)
+$localTag = if ($CudaTag -eq "cpu") { "+cpu" } else { "+$CudaTag" }
+$pinLines = @($pinLines | Where-Object { $_ -notmatch '^(pytest|ruff)' } | ForEach-Object {
+    $_ -replace '^(torch(?:vision)?==[0-9.]+)\+cu[0-9]+$', "`$1$localTag"
+})
+$reqFile  = Join-Path $out "requirements-offline.txt"
+$consFile = Join-Path $out "constraints-offline.txt"
 if (-not $DryRun) {
-    Set-Content -Path $reqFile -Value (@("# CameraSmart offline bundle ($CudaTag)", "# generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm')") + $pinLines) -Encoding ASCII
+    $header = @("# CameraSmart offline bundle ($CudaTag)", "# generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm')")
+    Set-Content -Path $reqFile  -Value ($header + $pinLines) -Encoding ASCII
+    Set-Content -Path $consFile -Value ($header + $pinLines) -Encoding ASCII
 }
 Write-Ok "$($pinLines.Count) بسته پین‌شده"
 
@@ -222,11 +226,6 @@ if ($LASTEXITCODE -ne 0) { throw "دانلود pip/setuptools ناموفق بو�
 & $pyExe @pyArgs @pipCommon -r $reqFile --extra-index-url $torchIndex
 if ($LASTEXITCODE -ne 0) { throw "دانلود بسته‌های اصلی ناموفق بود (خروجی بالا را ببینید)." }
 
-if ($CudaTag -ne "cu124") {
-    Write-Step "دانلود PyTorch برای $CudaTag"
-    & $pyExe @pyArgs @pipCommon torch torchvision --index-url $torchIndex
-    if ($LASTEXITCODE -ne 0) { throw "دانلود PyTorch ناموفق بود." }
-}
 $wheelCount = (Get-ChildItem $wheels -Filter *.whl).Count
 Write-Ok "$wheelCount فایل wheel دانلود شد"
 
