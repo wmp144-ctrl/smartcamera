@@ -45,11 +45,20 @@ class Settings(BaseSettings):
     database_url: str = ""
     # Log every SQL statement (very chatty; only for diagnosing queries).
     sql_echo: bool = False
+    # SQLite opens a connection per transaction with ``NullPool`` (~6 ms each).
+    # A small pool keeps those connections warm; 0 restores ``NullPool`` (used by
+    # the test-suite, which creates a new event loop per test).
+    database_pool_size: int = 2
 
     # --- detection ----------------------------------------------------------
     default_model: str = "rf-detr-base"  # RF-DETR weight key
+    #: When a camera is created without an explicit model, pick the heaviest one
+    #: that still fits the detection budget of the cameras already detecting.
+    auto_model_selection: bool = True
     default_detection_fps: float = 5.0
-    default_stream_fps: int = 20
+    #: Decoding at 20 fps costs ~70 ms/s of CPU per 1080p camera for a frame rate
+    #: the eye and the 5 fps detector do not need; 12 keeps the live view smooth.
+    default_stream_fps: int = 12
     # Minimum fraction of a frame that must change for "motion" to register.
     motion_sensitivity: float = 0.004
     # An object is considered stationary when it does not move for this long.
@@ -67,7 +76,11 @@ class Settings(BaseSettings):
     device: str = "cuda"
     jpeg_quality: int = 80
     # Live-view JPEGs are downscaled to this width to keep many cameras cheap.
-    live_max_width: int = 1280
+    live_max_width: int = 960
+    #: Hard cap on the MJPEG frame rate a client may ask for.
+    live_max_fps: int = 20
+    #: Stored evidence images are capped at this width (0 = original).
+    snapshot_max_width: int = 1280
     # Path to ffmpeg/ffprobe; "ffmpeg" resolves from PATH.
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"

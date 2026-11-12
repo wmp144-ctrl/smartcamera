@@ -9,7 +9,8 @@ from typing import Annotated, AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CameraDep, SessionDep
 from app.core.config import settings
@@ -31,7 +32,7 @@ from app.schemas.camera import (
 from app.schemas.common import Message
 from app.schemas.system import HealthRead
 from app.services.camera_manager import manager, runtime_config_from_camera, zones_from_camera
-from app.services.models_registry import RFDETR_MODELS
+from app.services.models_registry import RFDETR_MODELS, suggest_model
 from app.services.stream import probe_stream
 
 logger = logging.getLogger(__name__)
@@ -86,13 +87,41 @@ async def list_cameras(
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def _default_model_name(
+    session: AsyncSession, *, detection_enabled: bool, detection_fps: float
+) -> str:
+    """Model for a new camera that keeps the GPU detection budget positive.
+
+    ``CAMERASMART_DEFAULT_MODEL`` is honoured when auto-selection is off or the
+    camera will not detect; otherwise the lightest model that still serves every
+    detecting camera at the requested cadence is chosen.
+    """
+    if not settings.auto_model_selection or not detection_enabled:
+        return settings.default_model
+    existing = await session.scalar(
+        select(func.count(Camera.id)).where(Camera.detection_enabled.is_(True))
+    )
+    chosen = suggest_model(int(existing or 0) + 1, detection_fps)
+    if chosen != settings.default_model:
+        logger.info(
+            "auto-selected %s for the new camera (%s camera(s) already detecting)",
+            chosen,
+            existing,
+        )
+    return chosen
+
+
 @router.post("", response_model=CameraWithZones, status_code=status.HTTP_201_CREATED)
 async def create_camera(payload: CameraCreate, session: SessionDep) -> Camera:
     data = payload.model_dump(exclude={"class_config", "reconnect_policy"})
     # ``CAMERASMART_DEFAULT_MODEL`` / ``_STREAM_FPS`` are the documented defaults
     # for a new camera; the schema leaves them unset so these actually apply.
     if not data.get("model_name"):
-        data["model_name"] = settings.default_model
+        data["model_name"] = await _default_model_name(
+            session,
+            detection_enabled=bool(data.get("detection_enabled")),
+            detection_fps=float(data.get("detection_fps") or settings.default_detection_fps),
+        )
     if not data.get("fps"):
         data["fps"] = settings.default_stream_fps
     camera = Camera(
@@ -378,7 +407,7 @@ async def camera_live(
 ) -> StreamingResponse:
     """MJPEG live view. ``overlay=true`` draws detected objects on the frame."""
     return StreamingResponse(
-        _mjpeg_stream(camera.id, overlay, fps),
+        _mjpeg_stream(camera.id, overlay, min(fps, settings.live_max_fps)),
         media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )

@@ -122,6 +122,19 @@ def save_object_images(
 
     array = np.asarray(frame)
     height, width = array.shape[:2]
+
+    full_image = to_pil(array)
+    # A 4K camera produced a ~1.8 MB evidence JPEG and cost ~8 ms of encoding
+    # per stored object; ``snapshot_max_width`` caps the stored frame (0 keeps
+    # the original resolution). Boxes are normalised, so they stay valid.
+    limit = settings.snapshot_max_width
+    if limit and full_image.width > limit:
+        ratio = limit / full_image.width
+        full_image = full_image.resize(
+            (limit, max(1, round(full_image.height * ratio))), Image.Resampling.BILINEAR
+        )
+        array = np.asarray(full_image)
+        height, width = array.shape[:2]
     box_px = denormalize_box(bbox_norm, width, height)
 
     directory = object_dir(camera_id, object_type, captured_at)
@@ -133,7 +146,6 @@ def save_object_images(
     crop_file = directory / f"{prefix}_crop.jpg"
     thumb_file = directory / f"{prefix}_thumb.jpg"
 
-    full_image = to_pil(array)
     if annotate:
         draw = ImageDraw.Draw(full_image)
         draw.rectangle(box_px, outline=color, width=max(2, width // 400))

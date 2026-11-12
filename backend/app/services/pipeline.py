@@ -180,6 +180,7 @@ class _TrackRuntime:
     stationary_event_sent: bool = False
     moving_event_sent: bool = False
     exit_image_captured: bool = False
+    last_quality: QualityReport | None = None
     zone_id: int | None = None
     crossed_lines: set[int] = field(default_factory=set)
     line_direction: str | None = None
@@ -386,15 +387,27 @@ class DetectionPipeline:
         eligible = track.distance_travelled >= min_motion
 
         # Score the frame once and reuse it for every capture decision, so a
-        # single frame never produces more than one stored image.
+        # single frame never produces more than one stored image. Scoring costs
+        # ~2 ms per object, so it only runs when a decision depends on it (no
+        # image yet, an event that needs an image, or a moving object whose
+        # sharpness can still improve); otherwise the last score is reused.
         report: QualityReport | None = None
         if self.config.record_snapshots:
-            report = evaluate_frame(
-                frame,
-                _box_px(track.bbox, frame),
-                track.confidence,
-                frame_area=float(result.frame_width * result.frame_height),
+            needs_score = (
+                not runtime.has_best
+                or not runtime.enter_event_sent
+                or track.motion_state == "moving"
             )
+            if needs_score:
+                report = evaluate_frame(
+                    frame,
+                    _box_px(track.bbox, frame),
+                    track.confidence,
+                    frame_area=float(result.frame_width * result.frame_height),
+                )
+                runtime.last_quality = report
+            else:
+                report = runtime.last_quality
 
         # 1) entry -----------------------------------------------------------
         if eligible and not runtime.enter_event_sent:

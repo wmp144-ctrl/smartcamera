@@ -197,6 +197,48 @@ RFDETR_MODELS: dict[str, ModelSpec] = {
 
 DEFAULT_MODEL_KEY = "rf-detr-base"
 
+#: Single-frame throughput measured on the reference machine (GTX 1650 4 GB,
+#: 1080p source): nano 39 ms, small 65 ms, base 106 ms per frame. The numbers
+#: only decide whether a configuration is plausible and which model a new
+#: camera gets; a faster GPU simply has more headroom than the table claims.
+MEASURED_FPS: dict[str, float] = {
+    "rf-detr-large": 5.0,
+    "rf-detr-medium": 7.0,
+    "rf-detr-base": 9.0,
+    "rf-detr-small": 15.0,
+    "rf-detr-nano": 25.0,
+}
+
+#: Heaviest first: the budget check walks this order. Medium/Large are left out
+#: on purpose: they need more VRAM than a 4 GB card has and the extra accuracy is
+#: not what a camera monitor needs, so the default ceiling is Base.
+_BY_COST: tuple[str, ...] = (
+    "rf-detr-base",
+    "rf-detr-small",
+    "rf-detr-nano",
+)
+
+#: Head-room kept free for the shared model lock, JPEG encoding and the UI.
+_HEADROOM = 1.15
+
+
+def detection_capacity(model_key: str) -> float:
+    """Approximate detections per second a single model instance can serve."""
+    return MEASURED_FPS.get(model_key, MEASURED_FPS[DEFAULT_MODEL_KEY])
+
+
+def suggest_model(camera_count: int, per_camera_fps: float) -> str:
+    """Heaviest model that still serves ``camera_count`` cameras at ``fps``.
+
+    Detector inference is serialised (one GPU, one model lock), so the demand is
+    the sum of every detecting camera's cadence.
+    """
+    demand = max(1, int(camera_count)) * max(0.5, float(per_camera_fps)) * _HEADROOM
+    for key in _BY_COST:
+        if detection_capacity(key) >= demand:
+            return key
+    return "rf-detr-nano"
+
 
 def get_model_spec(key: str | None) -> ModelSpec:
     """Return the spec for a key, falling back to the default model."""

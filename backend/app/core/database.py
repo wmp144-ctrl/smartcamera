@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import AsyncAdaptedQueuePool, NullPool
 
 from app.core.config import settings
 
@@ -27,9 +27,18 @@ if settings.resolved_database_url.startswith("sqlite"):
     # ``check_same_thread`` is irrelevant for aiosqlite but the timeout helps
     # when a worker and the API hit the same file database.
     _engine_kwargs["connect_args"] = {"timeout": 30}
-    # NullPool keeps every connection fresh: it avoids cross-event-loop
-    # surprises (tests, uvicorn reload workers) and is cheap for SQLite.
-    _engine_kwargs["poolclass"] = NullPool
+    if settings.database_pool_size > 0:
+        # Opening a SQLite connection (plus its PRAGMAs) measured ~6 ms, which
+        # the persistence task paid on every batch. A couple of warm connections
+        # remove that; the pool is per-process and the app runs one event loop.
+        _engine_kwargs["poolclass"] = AsyncAdaptedQueuePool
+        _engine_kwargs["pool_size"] = settings.database_pool_size
+        _engine_kwargs["max_overflow"] = 2
+        _engine_kwargs["pool_timeout"] = 30
+    else:
+        # NullPool keeps every connection fresh: it avoids cross-event-loop
+        # surprises (tests, uvicorn reload workers) and is cheap for SQLite.
+        _engine_kwargs["poolclass"] = NullPool
 
 async_engine: AsyncEngine = create_async_engine(
     # Echoing every statement is a *diagnostic* switch of its own: tying it to
@@ -62,7 +71,11 @@ def _enable_sqlite_pragmas(dbapi_connection, _record) -> None:  # noqa: ANN001
             _wal_ensured = True
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA synchronous=NORMAL")
+        # The 30 s timeout already comes from ``connect_args``; the cache and
+        # temp-store pragmas cut page churn on the statistics queries.
         cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA cache_size=-16000")
+        cursor.execute("PRAGMA temp_store=MEMORY")
     finally:
         cursor.close()
 

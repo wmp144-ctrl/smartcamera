@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import os
+import queue
 import shutil
 import subprocess
 import threading
@@ -45,7 +46,7 @@ LIVE_IDLE_GRACE_SECONDS = 3.0
 #: decode thread, delaying the next frame (and the live view) by ~20-40 ms per
 #: object entering the scene. One background worker keeps that work off the
 #: video path while preserving the frame order of every camera.
-_SNAPSHOT_WRITER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="snapshot-writer")
+_SNAPSHOT_WRITER = ThreadPoolExecutor(max_workers=2, thread_name_prefix="snapshot-writer")
 
 #: How long ``start()`` waits for a decode thread a previous ``stop()`` could not
 #: finish joining (a reader blocked in a socket read returns after ``-rw_timeout``).
@@ -522,6 +523,12 @@ class CameraStream:
         #: inside a bounded socket read for a few seconds). They are joined by
         #: ``start()`` so the same camera never runs two decoders at once.
         self._orphan_threads: list[threading.Thread] = []
+        #: Detection runs on its own thread. Inferring inside the decode loop made
+        #: the camera blind for 40-120 ms per detection (the reader cannot pull
+        #: frames while torch is busy): visible stutter and dropped frames.
+        #: The queue holds **one** frame, so a newer frame replaces a waiting one.
+        self._detect_queue: queue.Queue[tuple[np.ndarray, float]] = queue.Queue(maxsize=1)
+        self._detect_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._last_frame: np.ndarray | None = None
@@ -554,10 +561,15 @@ class CameraStream:
             self._set_state("error", "راه‌اندازی مجدد ناموفق بود؛ دوباره تلاش کنید")
             return
         self._stop.clear()
+        self._drain_detections()
         self._thread = threading.Thread(
             target=self._run, name=f"camera-{self.config.id}", daemon=True
         )
         self._thread.start()
+        self._detect_thread = threading.Thread(
+            target=self._detect_loop, name=f"detect-{self.config.id}", daemon=True
+        )
+        self._detect_thread.start()
 
     def stop(self, timeout: float = 6.0) -> None:
         """Signal the decode loop to end and wait for it (bounded).
@@ -570,14 +582,20 @@ class CameraStream:
         self._stop.set()
         thread = self._thread
         self._thread = None
-        if thread is None or thread is threading.current_thread():
-            return
-        thread.join(timeout)
-        if thread.is_alive() and thread not in self._orphan_threads:
-            self._orphan_threads.append(thread)
-            logger.warning(
-                "camera %s: decode thread has not finished stopping yet", self.config.id
-            )
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+            if thread.is_alive() and thread not in self._orphan_threads:
+                self._orphan_threads.append(thread)
+                logger.warning(
+                    "camera %s: decode thread has not finished stopping yet", self.config.id
+                )
+        # The detector thread only *reads* frames, so it can be stopped after the
+        # decoder: pipeline state is swapped by ``reload()`` once both are done.
+        detect = self._detect_thread
+        self._detect_thread = None
+        if detect is not None and detect is not threading.current_thread():
+            detect.join(timeout)
+        self._drain_detections()
 
     def _join_orphans(self, timeout: float | None = None) -> bool:
         """Wait for threads left over by an earlier ``stop()``. True = no orphans."""
@@ -805,7 +823,7 @@ class CameraStream:
                 self._publish_frame(frame)
 
                 if self._should_detect(read_done):
-                    self._run_detection(frame, read_done)
+                    self._submit_detection(frame, read_done)
 
                 elapsed = time.perf_counter() - loop_start
                 sleep_for = expect_interval - elapsed
@@ -858,10 +876,48 @@ class CameraStream:
         self._last_detect_at = now
         return True
 
-    def _run_detection(self, frame: np.ndarray, now: float) -> None:
-        assert self.pipeline is not None
+    def _submit_detection(self, frame: np.ndarray, now: float) -> None:
+        """Queue a frame for the detection thread, replacing any waiting frame.
+
+        Detection samples the stream (5 fps by default), so analysing the newest
+        frame is always preferable to working through a backlog of old ones.
+        """
         try:
-            result = self.pipeline.process(frame, ts=utcnow(), now=now)
+            self._detect_queue.put_nowait((frame, now))
+        except queue.Full:
+            try:
+                self._detect_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._detect_queue.put_nowait((frame, now))
+            except queue.Full:  # pragma: no cover - extreme scheduling luck
+                pass
+
+    def _drain_detections(self) -> None:
+        while True:
+            try:
+                self._detect_queue.get_nowait()
+            except queue.Empty:
+                return
+
+    def _detect_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                frame, now = self._detect_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            try:
+                self._run_detection(frame, now)
+            except Exception:  # noqa: BLE001 - never let the worker die
+                logger.exception("detection loop failed for camera %s", self.config.id)
+
+    def _run_detection(self, frame: np.ndarray, now: float) -> None:
+        pipeline = self.pipeline
+        if pipeline is None:
+            return
+        try:
+            result = pipeline.process(frame, ts=utcnow(), now=now)
         except Exception:  # noqa: BLE001 - detection must never kill the stream
             logger.exception("detection failed for camera %s", self.config.id)
             return
@@ -895,7 +951,7 @@ class CameraStream:
             # the decoder thread continues with the next frame. The result is
             # forwarded from that worker to keep the image and its metadata in
             # one order for the persistence task.
-            pipeline_config = self.pipeline.config
+            pipeline_config = pipeline.config
             camera = self.config
 
             def write_and_forward() -> None:

@@ -17,9 +17,13 @@ os.environ["CAMERASMART_DATA_DIR"] = str(_TEST_DIR)
 os.environ["CAMERASMART_DATABASE_URL"] = f"sqlite+aiosqlite:///{(_TEST_DIR / 'test.db').as_posix()}"
 os.environ["CAMERASMART_TIMEZONE"] = "Asia/Tehran"
 os.environ["CAMERASMART_ALERTS_ENABLED"] = "true"
+os.environ["CAMERASMART_DATABASE_POOL_SIZE"] = "0"
 # Never spawn ffmpeg/RTSP worker threads during the test suite; the streaming
 # layer is exercised separately with an injected fake reader.
 os.environ["CAMERASMART_AUTOSTART_CAMERAS"] = "false"
+# Each test gets its own event loop, and a pooled aiosqlite connection stays
+# bound to the loop that opened it: keep the test-suite on NullPool.
+os.environ["CAMERASMART_DATABASE_POOL_SIZE"] = "0"
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402

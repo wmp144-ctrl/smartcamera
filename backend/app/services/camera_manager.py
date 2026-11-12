@@ -45,6 +45,7 @@ from app.services.bus import (
 )
 from app.services.detector import registry as detector_registry
 from app.services.heatmap import HeatmapBuffer, flush_buffer
+from app.services.models_registry import detection_capacity, suggest_model
 from app.services.persistence import PersistOutcome, Persister
 from app.services.pipeline import DetectionPipeline, PipelineResult, ZoneSpec
 from app.services.stream import CameraRuntimeConfig, CameraStream
@@ -393,6 +394,47 @@ class CameraManager:
     def detection_fps_total(self) -> float:
         return sum(stream.health.detection_fps for stream in self._streams.values())
 
+    @property
+    def detection_budget(self) -> dict:
+        """Configured detection demand compared with the model's capacity.
+
+        Inference is serialised per model instance, so the demand is the sum of
+        every detecting camera's cadence. A negative budget means the cameras
+        are configured to ask for more frames than the GPU can deliver; the UI
+        uses this to suggest a lighter model instead of silently falling behind.
+        """
+        demand: dict[str, float] = {}
+        cameras = 0
+        for stream in self._streams.values():
+            config = stream.config
+            if not config.detection_enabled:
+                continue
+            cameras += 1
+            demand[config.model_name] = (
+                demand.get(config.model_name, 0.0) + float(config.detection_fps)
+            )
+        models: list[dict] = []
+        overloaded = False
+        for key, used in sorted(demand.items(), key=lambda item: -item[1]):
+            capacity = detection_capacity(key)
+            over = used > capacity
+            overloaded = overloaded or over
+            models.append(
+                {
+                    "model": key,
+                    "demand_fps": round(used, 2),
+                    "capacity_fps": capacity,
+                    "overloaded": over,
+                }
+            )
+        average = (sum(demand.values()) / cameras) if cameras else 0.0
+        return {
+            "cameras": cameras,
+            "models": models,
+            "overloaded": overloaded,
+            "suggested_model": suggest_model(cameras, average) if cameras else None,
+        }
+
     def active_detection_cameras(self) -> int:
         """Cameras actually running a detector (not merely flagged for it).
 
@@ -734,6 +776,7 @@ class CameraManager:
             "dropped_results": self._dropped_results,
             "subscribers": bus.subscriber_count,
             "models": detector_registry.loaded(),
+            "detection_budget": self.detection_budget,
         }
 
 

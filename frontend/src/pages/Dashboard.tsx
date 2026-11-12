@@ -11,6 +11,7 @@ import {
   ScanEye,
   Thermometer,
   TrendingUp,
+  TriangleAlert,
   Users,
   Zap,
 } from "lucide-react";
@@ -37,7 +38,7 @@ import { Button } from "../components/ui/button";
 import { Card, CardBody, CardHeader, PageHeader } from "../components/ui/card";
 import { EmptyState, LoadingBlock, Metric, Progress } from "../components/ui/misc";
 import { formatClock } from "../lib/jalali";
-import { useCameras, useCameraStatuses, useGPU, useOverview } from "../lib/queries";
+import { useCameras, useCameraStatuses, useGPU, useOverview, useRuntime } from "../lib/queries";
 import {
   classLabel,
   directionLabel,
@@ -53,11 +54,34 @@ import { useLive } from "../store/live";
 
 const CHART_COLORS = ["#22d3ee", "#6366f1", "#f59e0b", "#22c55e", "#f43f5e", "#38bdf8", "#a855f7"];
 
+const MODEL_NAMES: Record<string, string> = {
+  "rf-detr-nano": "Nano",
+  "rf-detr-small": "Small",
+  "rf-detr-base": "Base",
+  "rf-detr-medium": "Medium",
+  "rf-detr-large": "Large",
+};
+
+type DetectionBudget = {
+  cameras: number;
+  overloaded: boolean;
+  suggested_model: string | null;
+  models: { model: string; demand_fps: number; capacity_fps: number; overloaded: boolean }[];
+};
+
 export function DashboardPage() {
   const overview = useOverview(14, 20_000);
   const cameras = useCameras(undefined, { refetchInterval: 20_000 });
   const statuses = useCameraStatuses(5000);
   const gpu = useGPU(5000);
+  const runtime = useRuntime(15_000);
+  const budget = (
+    runtime.data?.manager as { detection_budget?: DetectionBudget } | undefined
+  )?.detection_budget;
+  const demandFps = useMemo(
+    () => (budget?.models ?? []).reduce((total, item) => total + item.demand_fps, 0),
+    [budget],
+  );
   const recentEvents = useLive((state) => state.recentEvents);
   const connection = useLive((state) => state.connection);
 
@@ -142,6 +166,25 @@ export function DashboardPage() {
           </>
         }
       />
+
+      {budget?.overloaded ? (
+        <div className="panel flex flex-wrap items-center gap-x-3 gap-y-1 border-warn/40 bg-warn/10 px-4 py-3 text-xs">
+          <TriangleAlert className="size-4 shrink-0 text-warn" />
+          <span className="font-semibold text-warn">
+            بار پردازش از ظرفیت کارت گرافیک بیشتر است
+          </span>
+          <span className="text-muted">
+            {toFaDigits(budget.cameras)} دوربین در مجموع {faNumber(demandFps, 1)} تشخیص در ثانیه
+            می‌خواهند؛ فریم‌ها عقب می‌افتند.
+            {budget.suggested_model
+              ? ` مدل پیشنهادی: ${MODEL_NAMES[budget.suggested_model] ?? budget.suggested_model}.`
+              : ""}
+          </span>
+          <Link to="/settings" className="font-medium text-brand hover:underline">
+            تغییر تنظیمات
+          </Link>
+        </div>
+      ) : null}
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Metric

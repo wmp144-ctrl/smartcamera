@@ -40,7 +40,9 @@ export function CameraTile({
         : "نامشخص";
 
   const liveUrl = useMemo(
-    () => api.cameras.liveUrl(camera.id, overlay, Math.min(camera.fps || 20, 30)),
+    // Grid tiles do not need the camera's full frame rate: each MJPEG stream
+    // costs CPU in the backend, and 12 fps is indistinguishable at tile size.
+    () => api.cameras.liveUrl(camera.id, overlay, Math.min(camera.fps || 20, 12)),
     [camera.id, camera.fps, overlay],
   );
 
