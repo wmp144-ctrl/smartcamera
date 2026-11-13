@@ -38,6 +38,9 @@ param(
     [string]$BundleDir = "",
     [int]$Port = 0,
     [string]$PythonExe = "",
+    #: پوشهٔ داده (پایگاه‌داده، تصاویر، مدل‌ها) بیرون از پوشهٔ برنامه، تا بروزرسانی
+    #: فقط فایل‌های برنامه را عوض کند و به داده دست نزند.
+    [string]$DataDir = "",
     [switch]$Lan,
     [switch]$Autostart,
     [switch]$Repair
@@ -115,9 +118,23 @@ if ($problems.Count -gt 0) {
 Write-Ok "$wheelCount فایل wheel"
 Write-Ok "وزن مدل: $($modelFiles.Name -join ', ')"
 Write-Ok "ffmpeg / رابط کاربری / فهرست نسخه‌ها موجود است"
+$bundleVersion = ""
+$bundleDbRevision = ""
 if (Test-Path (Join-Path $bundle "manifest.json")) {
     $manifest = Get-Content (Join-Path $bundle "manifest.json") -Raw | ConvertFrom-Json
     Write-Host ("       ساخته‌شده: {0} — CUDA: {1}" -f $manifest.generated_at, $manifest.cuda_tag)
+    $bundleVersion = "$($manifest.app_version)"
+    $bundleDbRevision = "$($manifest.db_revision)"
+}
+# A code-only release zip carries its version in version.json at the app root.
+$versionFile = Join-Path $root "version.json"
+if (Test-Path $versionFile) {
+    $localVersion = Get-Content $versionFile -Raw | ConvertFrom-Json
+    if ($localVersion.app_version) { $bundleVersion = "$($localVersion.app_version)" }
+    if ($localVersion.db_revision) { $bundleDbRevision = "$($localVersion.db_revision)" }
+    Write-Host ("       نسخهٔ برنامه: {0} — نسخهٔ پایگاه‌داده: {1}" -f $bundleVersion, $bundleDbRevision)
+} elseif ($bundleVersion) {
+    Write-Host ("       نسخهٔ برنامه: {0} — نسخهٔ پایگاه‌داده: {1}" -f $bundleVersion, $bundleDbRevision)
 }
 
 # ---------------------------------------------------------------------------
@@ -323,6 +340,23 @@ if (-not (Test-Path $envFile)) {
 }
 
 # ---------------------------------------------------------------------------
+# پوشهٔ داده بیرون از پوشهٔ برنامه (اختیاری ولی پیشنهادی)
+# ---------------------------------------------------------------------------
+if ($DataDir) {
+    $dataPath = [System.IO.Path]::GetFullPath($DataDir)
+    New-Item -ItemType Directory -Force -Path $dataPath | Out-Null
+    $dataPosix = $dataPath -replace '\\', '/'
+    $envLines = @(Get-Content $envFile)
+    if ($envLines | Select-String '^CAMERASMART_DATA_DIR=') {
+        $envLines = @($envLines -replace '^CAMERASMART_DATA_DIR=.*$', "CAMERASMART_DATA_DIR=$dataPosix")
+    } else {
+        $envLines += @("", "# --- پوشهٔ داده خارج از پوشهٔ برنامه (بروزرسانی به داده دست نمی‌زند) ---", "CAMERASMART_DATA_DIR=$dataPosix")
+    }
+    Set-Content -Path $envFile -Value $envLines -Encoding UTF8
+    Write-Ok "پوشهٔ داده در .env تنظیم شد: $dataPath"
+}
+
+# ---------------------------------------------------------------------------
 # ۶) پایگاه داده
 # ---------------------------------------------------------------------------
 Write-Step "۶/۷ ساخت/به‌روزرسانی پایگاه داده"
@@ -361,6 +395,20 @@ else:
         throw "alembic upgrade head ناموفق بود (خروجی بالا)."
     }
     Write-Ok "جداول پایگاه داده آماده هستند"
+
+    # Version compatibility: the bundle lists the schema revision it expects. If
+    # the database ends up on a different revision, the code and the data do not
+    # belong together and running the app would fail at the first query.
+    if ($bundleDbRevision) {
+        # Do not redirect stderr here: PowerShell 5.1 turns a native command's
+        # stderr into a terminating error when it is redirected and the script
+        # runs with ``$ErrorActionPreference = Stop``.
+        $currentRevision = (& $py -m alembic current | Out-String)
+        if ($currentRevision -notmatch [regex]::Escape($bundleDbRevision)) {
+            throw "ناسازگاری نسخه: بسته نسخهٔ پایگاه‌داده «$bundleDbRevision» را انتظار دارد ولی پایگاه‌داده روی نسخهٔ دیگری است.`nخروجی alembic current:`n$currentRevision`nبستهٔ سازگار با دادهٔ فعلی را نصب کنید."
+        }
+        Write-Ok "نسخهٔ پایگاه‌داده با بسته هم‌خوان است ($bundleDbRevision)"
+    }
 
     Write-Step "۷/۷ بررسی سلامت نصب"
     & $py -c @"

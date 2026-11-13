@@ -133,6 +133,9 @@ powershell -ExecutionPolicy Bypass -File scripts\download_offline.ps1
 #   -IndexUrl https://mirror/simple      میرور PyPI دیگر
 #   -PipRetries 8                        تلاش دوبارهٔ pip در صورت قطع اتصال
 #   -UseSystemProxy                      استفاده از پروکسی سیستم حتی اگر لوکال باشد
+#   -WheelCache D:\wheel-cache          محل کش wheel ها (پیش‌فرض: %LOCALAPPDATA%\CameraSmart\wheel-cache)
+#   -RefreshWheels                       نادیده‌گرفتن کش و دانلود دوباره
+#   -NoWheelCache                       غیرفعال‌کردن کش
 ```
 
 نکته‌ها:
@@ -152,6 +155,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_offline.ps1
 # اختیاری:
 #   -BundleDir D:\offline     مسیر دیگر بسته
 #   -Port 8080                 پورت ذخیره‌شده در .env
+#   -DataDir D:\CameraSmartData  پوشهٔ داده بیرون از پوشهٔ برنامه (پیشنهادی برای بروزرسانی)
 #   -Lan                       گوش‌دادن روی 0.0.0.0 + قانون فایروال (Administrator)
 #   -Autostart                 اجرای خودکار در ورود کاربر (Administrator)
 #   -Repair                    نصب دوبارهٔ بسته‌ها حتی اگر نصب باشند
@@ -211,6 +215,39 @@ offline/
 | Node.js | فقط ساخت رابط کاربری روی سیستم آنلاین | روی ماشین مقصد لازم نیست |
 | درایور NVIDIA ≥ ۵۲۵ | تشخیص روی GPU | بدون آن هم برنامه با CPU کار می‌کند (کندتر) |
 | فضای دیسک | — | حدود ۴ گیگابایت برای بسته + ۵ گیگابایت برای نصب |
+
+### بروزرسانی نسخه‌دار (بدون Git و بدون Node روی مقصد)
+
+```powershell
+# روی سیستم آنلاین: ساخت بستهٔ نسخه‌دار
+powershell -ExecutionPolicy Bypass -File scripts\make_release.ps1
+#   -Version 1.0.20261120    نسخهٔ دلخواه (پیش‌فرض: 1.0.<تاریخ امروز>)
+#   -CodeOnly                فقط کد + رابط کاربری ساخته‌شده (چند ده مگابایت، پیش‌نیازها همراهش نیست)
+#   -BuildFrontend           اجرای npm ci / npm run build حتی اگر dist باشد
+#   -NoZip                   فقط پوشهٔ نسخه ساخته شود
+```
+
+خروجی در `release/CameraSmart-<version>/` (و یک zip) است: کد برنامه بدون `.venv`/`data`/`.env`،
+رابط کاربری ساخته‌شده، اسکریپت‌ها، به‌همراه `version.json` (نسخهٔ برنامه، کامیت، نسخهٔ پایگاه‌داده).
+روی سیستم مقصد فقط zip را باز کنید و همان دو دستور نصب/اجرا را بزنید؛ **نسخهٔ پایگاه‌داده** در
+`version.json` با `alembic_version` مقایسه می‌شود و در صورت ناسازگاری نصب با پیام روشن متوقف می‌شود.
+
+### کش wheel ها بین نسخه‌ها
+
+دانلود دوبارهٔ حدود ۳٫۴ گیگابایت wheel برای هر بروزرسانی لازم نیست. `download_offline.ps1` یک کش
+در `%LOCALAPPDATA%\CameraSmart\wheel-cache` نگه می‌دارد و از یک امضای SHA-256 روی فهرست پین‌ها،
+برچسب CUDA و آدرس ایندکس استفاده می‌کند:
+
+- اگر امضا تغییر نکرده باشد، **کل مرحلهٔ دانلود (شامل torch) رد می‌شود** و wheel ها از کش کپی می‌شوند.
+- اگر فقط چند پین عوض شده باشد، امضا فرق می‌کند و دانلود انجام می‌شود؛ سپس کش به‌روز می‌شود.
+- `-RefreshWheels` برای اجبار به دانلود دوباره، `-NoWheelCache` برای غیرفعال‌کردن، و
+  `-WheelCache <path>` برای نگه‌داشتن کش روی درایو دیگر (مثلاً برای انتقال با فلش).
+
+### جدا کردن داده از برنامه
+
+با `install_offline.ps1 -DataDir D:\CameraSmartData` خط `CAMERASMART_DATA_DIR` در `backend\.env`
+نوشته می‌شود (پایگاه‌داده، تصاویر ذخیره‌شده و وزن مدل‌ها به آنجا می‌روند). آن‌گاه بروزرسانی فقط
+فایل‌های برنامه را عوض می‌کند و داده دست‌نخورده می‌ماند.
 
 ---
 

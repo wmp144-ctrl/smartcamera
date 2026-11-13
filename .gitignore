@@ -43,3 +43,7 @@ ui-shots/
 
 # Offline bundle download log
 offline-download.log
+
+# --- generated release packages ------------------------------------------
+release/
+version.json

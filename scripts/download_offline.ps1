@@ -60,6 +60,13 @@ param(
     #: اگر شبکه شما واقعاً به پروکسی نیاز دارد، این را بدهید تا پروکسی سیستم
     #: (از جمله پروکسی لوکالِ خاموش) دور زده نشود.
     [switch]$UseSystemProxy,
+    #: پوشهٔ کش wheel ها که بین نسخه‌ها نگه داشته می‌شود (پیش‌فرض:
+    #: %LOCALAPPDATA%\CameraSmart\wheel-cache). اگر پین‌ها تغییر نکرده باشند،
+    #: دانلود کامل رد می‌شود و فقط از کش کپی می‌شود.
+    [string]$WheelCache = "",
+    #: کش را نادیده بگیر و همهٔ wheel ها را دوباره بررسی/دریافت کن
+    [switch]$RefreshWheels,
+    [switch]$NoWheelCache,
     [switch]$DryRun
 )
 
@@ -189,6 +196,48 @@ if (-not $DryRun) {
     Set-Content -Path $consFile -Value ($header + $pinLines) -Encoding ASCII
 }
 Write-Ok "$($pinLines.Count) بسته پین‌شده"
+
+# ---------------------------------------------------------------------------
+# کش wheel ها بین نسخه‌ها
+# ---------------------------------------------------------------------------
+# هر بروزرسانی معمولاً فقط چند پین را عوض می‌کند، ولی دانلود دوبارهٔ ۳٫۴ گیگابایت
+# wheel وقت زیادی می‌برد. یک امضای SHA-256 از فهرست پین‌ها + برچسب CUDA + ایندکس
+# نگه می‌داریم: اگر امضا همان باشد و کش پر باشد، مرحلهٔ دانلود کامل رد می‌شود.
+Write-Step "کش wheel ها بین نسخه‌ها"
+$cacheDir = if ($WheelCache) {
+    [System.IO.Path]::GetFullPath($WheelCache)
+} elseif ($NoWheelCache) {
+    ""
+} else {
+    Join-Path $env:LOCALAPPDATA "CameraSmart\wheel-cache"
+}
+$signatureText = (($pinLines -join "`n") + "|cuda=" + $CudaTag + "|index=" + $IndexUrl + "|py=3.11")
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $signature = ([System.BitConverter]::ToString(
+        $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($signatureText))
+    ) -replace '-', '').ToLower()
+} finally {
+    $sha256.Dispose()
+}
+$stampFile = if ($cacheDir) { Join-Path $cacheDir "pins-$signature.ok" } else { $null }
+$cachedWheels = @()
+if ($cacheDir -and (Test-Path $cacheDir)) {
+    $cachedWheels = @(Get-ChildItem $cacheDir -Filter *.whl -ErrorAction SilentlyContinue)
+}
+$cacheHit = [bool](
+    $stampFile -and (Test-Path $stampFile) -and -not $RefreshWheels -and $cachedWheels.Count -gt 0
+)
+if (-not $cacheDir) {
+    Write-Warn "کش wheel غیرفعال است (NoWheelCache)"
+} elseif ($cacheHit) {
+    Write-Ok "کش هم‌راستا است ($($cachedWheels.Count) wheel) — دانلود پایتون رد می‌شود"
+} elseif (Test-Path $stampFile) {
+    Write-Warn "امضای پین‌ها یکی است ولی کش خالی است؛ دانلود انجام می‌شود"
+} else {
+    Write-Warn "کش برای این نسخهٔ پین‌ها وجود ندارد؛ این بار دانلود لازم است"
+}
+Write-Host "       کش: $(if ($cacheDir) { $cacheDir } else { '—' })" -ForegroundColor DarkGray
 
 if ($DryRun) {
     Write-Step "بررسی دسترسی به منابع (DryRun)"
@@ -327,7 +376,17 @@ function Save-RemoteFile {
     return $false
 }
 
-if (-not (Invoke-PipDownload -PipArgs @("pip", "setuptools", "wheel", "--quiet"))) {
+# If the cache already matches the pinned set, the bundle is filled from it and
+# every network step below is skipped entirely.
+if ($cacheHit) {
+    New-Item -ItemType Directory -Force -Path $wheels | Out-Null
+    $seedArgs = @($cacheDir, $wheels, "*.whl", "/NJH", "/NJS", "/NDL", "/NFL", "/NP", "/R:1", "/W:1")
+    & robocopy @seedArgs | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "کپی wheel ها از کش ناموفق بود (کد $LASTEXITCODE)." }
+    Write-Ok "wheel ها از کش در بسته کپی شدند"
+}
+
+if (-not $cacheHit -and -not (Invoke-PipDownload -PipArgs @("pip", "setuptools", "wheel", "--quiet"))) {
     throw "دانلود pip/setuptools ناموفق بود."
 }
 
@@ -339,7 +398,7 @@ $otherPins = @($pinLines | Where-Object { $_ -notmatch '^(torch|torchvision)==' 
 $downloadReq = Join-Path $out "requirements-download.txt"
 Set-Content -Path $downloadReq -Value (@("# torch/torchvision are fetched separately (resumable curl)") + $otherPins) -Encoding ASCII
 
-foreach ($pin in $torchPins) {
+foreach ($pin in $(if ($cacheHit) { @() } else { $torchPins })) {
     $name, $version = $pin -split '==' | Select-Object -First 2
     $fileName = "$name-$version-cp311-cp311-win_amd64.whl"
     $target = Join-Path $wheels $fileName
@@ -355,7 +414,7 @@ foreach ($pin in $torchPins) {
 # -c constraints-offline.txt pins torch/torchvision to the tag already fetched
 # above. Without it pip pulls whatever torch the dependencies ask for (e.g.
 # torch-2.15.0) and the bundle would contain two competing torch wheels.
-if (-not (Invoke-PipDownload -PipArgs @("-r", $downloadReq, "-c", $consFile, "--find-links", $wheels))) {
+if (-not $cacheHit -and -not (Invoke-PipDownload -PipArgs @("-r", $downloadReq, "-c", $consFile, "--find-links", $wheels))) {
     Write-Warn "دانلود بسته‌ها شکست خورد؛ اتصال میرور ناپایدار است."
     Write-Warn "با میرور دیگری امتحان کنید، مثلاً:"
     Write-Warn "  -IndexUrl https://mirrors.cloud.tencent.com/pypi/simple"
@@ -364,7 +423,24 @@ if (-not (Invoke-PipDownload -PipArgs @("-r", $downloadReq, "-c", $consFile, "--
 }
 
 $wheelCount = (Get-ChildItem $wheels -Filter *.whl).Count
-Write-Ok "$wheelCount فایل wheel دانلود شد"
+Write-Ok "$wheelCount فایل wheel در بسته موجود است"
+
+# Remember this exact pin set so the next release can skip the download.
+if (-not $cacheHit -and $cacheDir -and -not $DryRun) {
+    if ($wheelCount -lt 20) {
+        Write-Warn "کش wheel ذخیره نشد: تعداد wheel ها کم است ($wheelCount)"
+    } else {
+        New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+        $saveArgs = @($wheels, $cacheDir, "*.whl", "/NJH", "/NJS", "/NDL", "/NFL", "/NP", "/R:1", "/W:1")
+        & robocopy @saveArgs | Out-Null
+        if ($LASTEXITCODE -ge 8) {
+            Write-Warn "کپی wheel ها به کش ناموفق بود (کد $LASTEXITCODE)"
+        } else {
+            Set-Content -Path $stampFile -Value "$signature`ncuda=$CudaTag`nwheels=$wheelCount" -Encoding ASCII
+            Write-Ok "کش wheel برای بروزرسانی‌های بعدی ذخیره شد: $cacheDir"
+        }
+    }
+}
 
 # ---------------------------------------------------------------------------
 Write-Step "دانلود وزن‌های مدل"
@@ -540,8 +616,46 @@ foreach ($file in @(Get-ChildItem $modelsOut -Filter *.pth -ErrorAction Silently
 }
 $wheelBytes = (Get-ChildItem $wheels -Filter *.whl | Measure-Object Length -Sum).Sum
 $distOk = Test-Path (Join-Path $distOut "index.html")
+
+# Version stamp: the installer compares the database revision in the bundle with
+# the one recorded in the database, so an old bundle can never silently run
+# against a newer schema (and vice versa).
+$appVersion = "1.0.0"
+$dbRevision = ""
+$gitSha = ""
+if ($repoRoot) {
+    $configFile = Join-Path $repoRoot "backend\app\core\config.py"
+    if (Test-Path $configFile) {
+        $configText = Get-Content $configFile -Raw
+        if ($configText -match 'version:\s*str\s*=\s*"([^"]+)"') { $appVersion = $Matches[1] }
+    }
+    $versionsDir = Join-Path $repoRoot "backend\alembic\versions"
+    if (Test-Path $versionsDir) {
+        $revisions = @{}
+        $downRevisions = @{}
+        foreach ($file in (Get-ChildItem $versionsDir -Filter *.py -ErrorAction SilentlyContinue)) {
+            $text = Get-Content $file.FullName -Raw
+            $revMatch = [regex]::Match($text, '(?m)^revision:\s*str\s*=\s*"([^"]+)"')
+            if ($revMatch.Success) { $revisions[$revMatch.Groups[1].Value] = $true }
+            $downMatch = [regex]::Match($text, '(?m)^down_revision:\s*[^=]+=\s*"([^"]+)"')
+            if ($downMatch.Success) { $downRevisions[$downMatch.Groups[1].Value] = $true }
+        }
+        $head = @($revisions.Keys | Where-Object { -not $downRevisions.ContainsKey($_) } | Sort-Object)
+        if ($head.Count -gt 0) { $dbRevision = $head[-1] }
+    }
+    try {
+        $gitSha = (& git -C $repoRoot rev-parse --short HEAD 2>$null)
+        if ($LASTEXITCODE -ne 0) { $gitSha = "" }
+    } catch { $gitSha = "" }
+}
+
 @{
     generated_at    = (Get-Date).ToUniversalTime().ToString("o")
+    app_version     = $appVersion
+    git_sha         = ("" + $gitSha).Trim()
+    db_revision     = $dbRevision
+    wheel_cache     = $cacheDir
+    wheel_cache_hit = [bool]$cacheHit
     platform        = "windows-x64"
     python_target   = "3.11"
     cuda_tag        = $CudaTag
