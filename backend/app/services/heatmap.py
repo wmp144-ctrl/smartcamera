@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +18,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 
 from app.core.config import settings
-from app.core.timeutil import to_local, utcnow
+from app.core.timeutil import day_bounds_utc, to_local, utcnow
+from app.models.detection import TrackRecord
 from app.models.system import HeatmapCell
 from app.services.geometry import grid_cell
 
@@ -200,6 +201,121 @@ async def flush_buffer(session: AsyncSession, buffer: HeatmapBuffer) -> int:
     return written
 
 
+#: The stored grid is fixed (``settings.heatmap_grid_*``); the UI may ask for a
+#: coarser or finer one and the answer is resampled from it.
+MIN_GRID = 4
+MAX_GRID_W = 160
+MAX_GRID_H = 120
+
+
+def clamp_grid(grid_w: int | None, grid_h: int | None) -> tuple[int, int]:
+    width = int(grid_w or settings.heatmap_grid_w)
+    height = int(grid_h or settings.heatmap_grid_h)
+    return (
+        max(MIN_GRID, min(MAX_GRID_W, width)),
+        max(MIN_GRID, min(MAX_GRID_H, height)),
+    )
+
+
+def rebin(
+    cells: list[int], src_w: int, src_h: int, dst_w: int, dst_h: int
+) -> list[int]:
+    """Resample a grid to another resolution, weighting cells by overlap.
+
+    Stored cells are one day (and one object type) each; a finer target grid is
+    filled by splitting a source cell over the target cells it covers, so the
+    total count stays (almost) unchanged.
+    """
+    if src_w <= 0 or src_h <= 0 or not cells:
+        return [0] * (dst_w * dst_h)
+    if (src_w, src_h) == (dst_w, dst_h):
+        return list(cells)
+
+    weights: dict[tuple[int, int], float] = defaultdict(float)
+    for row in range(src_h):
+        for column in range(src_w):
+            index = row * src_w + column
+            count = cells[index] if index < len(cells) else 0
+            if not count:
+                continue
+            x0, x1 = column / src_w, (column + 1) / src_w
+            y0, y1 = row / src_h, (row + 1) / src_h
+            tx0, tx1 = int(x0 * dst_w), min(dst_w, int(x1 * dst_w) + 1)
+            ty0, ty1 = int(y0 * dst_h), min(dst_h, int(y1 * dst_h) + 1)
+            for ty in range(ty0, ty1):
+                overlap_y = min(y1, (ty + 1) / dst_h) - max(y0, ty / dst_h)
+                if overlap_y <= 0:
+                    continue
+                for tx in range(tx0, tx1):
+                    overlap_x = min(x1, (tx + 1) / dst_w) - max(x0, tx / dst_w)
+                    if overlap_x <= 0:
+                        continue
+                    weights[(tx, ty)] += count * overlap_x * overlap_y * src_w * src_h
+
+    out = [0] * (dst_w * dst_h)
+    for (tx, ty), value in weights.items():
+        out[ty * dst_w + tx] = int(round(value))
+    return out
+
+
+async def _heatmap_for_hours(
+    session: AsyncSession,
+    camera_id: int,
+    *,
+    day: date,
+    hour_from: int,
+    hour_to: int,
+    object_type: str | None,
+    grid_w: int,
+    grid_h: int,
+) -> dict[str, object]:
+    """Heatmap for an hour range of one local day.
+
+    Stored cells are per *day*, so an hour range cannot be answered from them.
+    Tracks carry ``first_seen`` and a normalised centre, which is exactly the
+    data needed to bin the objects of a few hours.
+    """
+    day_start, _ = day_bounds_utc(day.year, day.month, day.day, settings.timezone)
+    start = day_start + timedelta(hours=hour_from)
+    end = day_start + timedelta(hours=hour_to + 1)
+    if end <= start:  # a range that wraps past midnight, e.g. 22 -> 03
+        end += timedelta(days=1)
+
+    stmt = select(TrackRecord.center_x, TrackRecord.center_y).where(
+        TrackRecord.camera_id == camera_id,
+        TrackRecord.first_seen >= start,
+        TrackRecord.first_seen < end,
+        TrackRecord.center_x.is_not(None),
+        TrackRecord.center_y.is_not(None),
+    )
+    if object_type and object_type != "*":
+        stmt = stmt.where(TrackRecord.object_type == object_type)
+
+    cells = [0] * (grid_w * grid_h)
+    max_count = 0
+    total = 0
+    for center_x, center_y in (await session.execute(stmt)).all():
+        column = min(grid_w - 1, max(0, int(float(center_x) * grid_w)))
+        row = min(grid_h - 1, max(0, int(float(center_y) * grid_h)))
+        index = row * grid_w + column
+        cells[index] += 1
+        max_count = max(max_count, cells[index])
+        total += 1
+
+    return {
+        "camera_id": camera_id,
+        "grid_w": grid_w,
+        "grid_h": grid_h,
+        "day": day,
+        "max_count": max_count,
+        "total": total,
+        "cells": cells,
+        "object_type": object_type or "*",
+        "hour_from": hour_from,
+        "hour_to": hour_to,
+    }
+
+
 async def get_heatmap(
     session: AsyncSession,
     camera_id: int,
@@ -208,8 +324,29 @@ async def get_heatmap(
     object_type: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
+    grid_w: int | None = None,
+    grid_h: int | None = None,
+    hour_from: int | None = None,
+    hour_to: int | None = None,
 ) -> dict[str, object]:
-    """Return a full grid of counts for a camera/day."""
+    """Return a full grid of counts for a camera/day (optionally an hour range)."""
+    target_w, target_h = clamp_grid(grid_w, grid_h)
+
+    if hour_from is not None or hour_to is not None:
+        first = 0 if hour_from is None else max(0, min(23, int(hour_from)))
+        last = 23 if hour_to is None else max(0, min(23, int(hour_to)))
+        target_day = day or (to_local(utcnow(), settings.timezone) or utcnow()).date()
+        return await _heatmap_for_hours(
+            session,
+            camera_id,
+            day=target_day,
+            hour_from=first,
+            hour_to=last,
+            object_type=object_type,
+            grid_w=target_w,
+            grid_h=target_h,
+        )
+
     grid_w = settings.heatmap_grid_w
     grid_h = settings.heatmap_grid_h
 
@@ -244,23 +381,22 @@ async def get_heatmap(
     ).all()
 
     cells = [0] * (grid_w * grid_h)
-    max_count = 0
-    total = 0
     for cell_x, cell_y, count in rows:
         index = int(cell_y) * grid_w + int(cell_x)
         if 0 <= index < len(cells):
-            value = int(count or 0)
-            cells[index] += value
-            max_count = max(max_count, cells[index])
-            total += value
+            cells[index] += int(count or 0)
+
+    if (target_w, target_h) != (grid_w, grid_h):
+        cells = rebin(cells, grid_w, grid_h, target_w, target_h)
+        grid_w, grid_h = target_w, target_h
 
     return {
         "camera_id": camera_id,
         "grid_w": grid_w,
         "grid_h": grid_h,
         "day": day,
-        "max_count": max_count,
-        "total": total,
+        "max_count": max(cells) if cells else 0,
+        "total": sum(cells),
         "cells": cells,
         "object_type": object_type or "*",
     }

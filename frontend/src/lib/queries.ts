@@ -471,7 +471,15 @@ export function useTopZones(limit = 10) {
 
 export function useHeatmap(
   cameraId: number | null,
-  params: { day?: string; object_type?: string; days_back?: number } = {},
+  params: {
+    day?: string;
+    object_type?: string;
+    days_back?: number;
+    grid_w?: number;
+    grid_h?: number;
+    hour_from?: number;
+    hour_to?: number;
+  } = {},
 ): UseQueryResult<HeatmapResponse> {
   return useQuery({
     queryKey: keys.heatmap(cameraId ?? -1, params),

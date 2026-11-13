@@ -273,6 +273,8 @@ export interface HeatmapResponse {
   total: number;
   cells: number[];
   object_type: string;
+  hour_from: number | null;
+  hour_to: number | null;
 }
 
 export interface GPUMetric {
@@ -696,7 +698,18 @@ export const api = {
       get<CountByKey[]>("/api/stats/event-types", params),
     busiestHours: (days = 7) => get<CountByKey[]>("/api/stats/busiest-hours", { days }),
     topZones: (limit = 10) => get<CountByKey[]>("/api/stats/top-zones", { limit }),
-    heatmap: (cameraId: number, params?: { day?: string; object_type?: string; days_back?: number }) =>
+    heatmap: (
+      cameraId: number,
+      params?: {
+        day?: string;
+        object_type?: string;
+        days_back?: number;
+        grid_w?: number;
+        grid_h?: number;
+        hour_from?: number;
+        hour_to?: number;
+      },
+    ) =>
       get<HeatmapResponse>(`/api/stats/heatmap/${cameraId}`, params),
     storage: () => get<StorageUsage>("/api/stats/storage"),
   },

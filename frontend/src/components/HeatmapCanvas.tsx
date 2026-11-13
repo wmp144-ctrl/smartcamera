@@ -36,6 +36,11 @@ export function HeatmapCanvas({
   day,
   objectType,
   daysBack,
+  gridW,
+  gridH,
+  opacity = 1,
+  hourFrom,
+  hourTo,
   aspectRatio = 16 / 9,
   className,
 }: {
@@ -43,10 +48,25 @@ export function HeatmapCanvas({
   day?: string;
   objectType?: string;
   daysBack?: number;
+  /** Requested grid resolution; the server resamples its stored grid. */
+  gridW?: number;
+  gridH?: number;
+  /** 0..1 multiplier for the cell alpha. */
+  opacity?: number;
+  hourFrom?: number | null;
+  hourTo?: number | null;
   aspectRatio?: number;
   className?: string;
 }) {
-  const query = useHeatmap(cameraId, { day, object_type: objectType, days_back: daysBack });
+  const query = useHeatmap(cameraId, {
+    day,
+    object_type: objectType,
+    days_back: daysBack,
+    grid_w: gridW,
+    grid_h: gridH,
+    hour_from: hourFrom ?? undefined,
+    hour_to: hourTo ?? undefined,
+  });
   const canvas = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -70,12 +90,13 @@ export function HeatmapCanvas({
         const count = data.cells[row * data.grid_w + column] ?? 0;
         if (count <= 0) continue;
         const [r, g, b, a] = densityColor(count / max);
-        if (a === 0) continue;
-        context.fillStyle = `rgba(${r}, ${g}, ${b}, ${a / 255})`;
+        const alpha = (a / 255) * opacity;
+        if (alpha <= 0.002) continue;
+        context.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
         context.fillRect(column * cellW, row * cellH, cellW + 0.6, cellH + 0.6);
       }
     }
-  }, [query.data]);
+  }, [query.data, opacity]);
 
   return (
     <div className={cn("space-y-2", className)}>
@@ -103,6 +124,12 @@ export function HeatmapCanvas({
               شبکه {toFaDigits(query.data?.grid_w ?? 0)}×{toFaDigits(query.data?.grid_h ?? 0)}
             </Badge>
             {query.data?.jalali ? <Badge tone="brand">{query.data.jalali}</Badge> : null}
+            {query.data?.hour_from != null && query.data?.hour_to != null ? (
+              <Badge tone="muted">
+                ساعت <span className="num">{toFaDigits(query.data.hour_from)}</span> تا
+                <span className="num">{toFaDigits(query.data.hour_to)}</span>
+              </Badge>
+            ) : null}
           </div>
           <div className="flex items-center gap-2">
             <span>کم</span>

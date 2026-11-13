@@ -110,6 +110,9 @@ class HeatmapResponse(BaseModel):
     # row-major grid of counts, length grid_w * grid_h
     cells: list[int]
     object_type: str = "*"
+    #: Set when the grid was built for an hour range instead of a whole day.
+    hour_from: int | None = None
+    hour_to: int | None = None
 
 
 class GPUMetric(BaseModel):

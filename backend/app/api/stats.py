@@ -135,6 +135,10 @@ async def heatmap(
     day: Annotated[str | None, Query(description="YYYY-MM-DD (local) or Jalali YYYY/MM/DD")] = None,
     object_type: str | None = None,
     days_back: Annotated[int, Query(ge=0, le=365)] = 0,
+    grid_w: Annotated[int | None, Query(ge=4, le=160, description="ستون‌های شبکه")] = None,
+    grid_h: Annotated[int | None, Query(ge=4, le=120, description="ردیف‌های شبکه")] = None,
+    hour_from: Annotated[int | None, Query(ge=0, le=23)] = None,
+    hour_to: Annotated[int | None, Query(ge=0, le=23)] = None,
 ) -> HeatmapResponse:
     camera = await session.get(Camera, camera_id)
     if camera is None:
@@ -147,7 +151,16 @@ async def heatmap(
         local = to_local(utcnow(), settings.timezone)
         target = (local.date() if local else date.today()) - timedelta(days=days_back)
 
-    data = await get_heatmap(session, camera_id, day=target, object_type=object_type)
+    data = await get_heatmap(
+        session,
+        camera_id,
+        day=target,
+        object_type=object_type,
+        grid_w=grid_w,
+        grid_h=grid_h,
+        hour_from=hour_from,
+        hour_to=hour_to,
+    )
     if target is not None:
         data["jalali"] = jalali_label(target)
     return HeatmapResponse(**data)

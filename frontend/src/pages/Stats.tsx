@@ -20,8 +20,8 @@ import { HeatmapCanvas } from "../components/HeatmapCanvas";
 import { Badge, StatusDot } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardBody, CardHeader, PageHeader } from "../components/ui/card";
-import { Field, Input, Select } from "../components/ui/field";
-import { EmptyState, LoadingBlock, Metric } from "../components/ui/misc";
+import { Checkbox, Field, Input, Select } from "../components/ui/field";
+import { EmptyState, LoadingBlock, Metric, Slider } from "../components/ui/misc";
 import { TableWrap, Tbody, Td, Th, Thead, Tr } from "../components/ui/table";
 import { formatClock, formatJalaliDate } from "../lib/jalali";
 import {
@@ -44,6 +44,12 @@ export function StatsPage() {
   const [heatmapCamera, setHeatmapCamera] = useState<number | null>(null);
   const [heatmapType, setHeatmapType] = useState("");
   const [daysBack, setDaysBack] = useState(0);
+  const [gridW, setGridW] = useState(64);
+  const [gridH, setGridH] = useState(36);
+  const [heatOpacity, setHeatOpacity] = useState(1);
+  const [hourFilter, setHourFilter] = useState(false);
+  const [hourFrom, setHourFrom] = useState(0);
+  const [hourTo, setHourTo] = useState(23);
 
   const cameras = useCameras();
   const overview = useOverview(14, 30_000);
@@ -376,11 +382,85 @@ export function StatsPage() {
               </Field>
             </div>
 
+            <div className="grid gap-3 md:grid-cols-4">
+              <Field label="ستون‌های شبکه" hint="۴ تا ۱۶۰">
+                <Input
+                  type="number"
+                  min={4}
+                  max={160}
+                  value={gridW}
+                  onChange={(event) =>
+                    setGridW(Math.min(160, Math.max(4, Number(event.target.value) || 4)))
+                  }
+                />
+              </Field>
+              <Field label="ردیف‌های شبکه" hint="۴ تا ۱۲۰">
+                <Input
+                  type="number"
+                  min={4}
+                  max={120}
+                  value={gridH}
+                  onChange={(event) =>
+                    setGridH(Math.min(120, Math.max(4, Number(event.target.value) || 4)))
+                  }
+                />
+              </Field>
+              <Field label="از ساعت">
+                <Select
+                  value={hourFrom}
+                  disabled={!hourFilter}
+                  onChange={(event) => setHourFrom(Number(event.target.value))}
+                >
+                  {Array.from({ length: 24 }, (_, hour) => (
+                    <option key={hour} value={hour}>
+                      {toFaDigits(String(hour).padStart(2, "0"))}:۰۰
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="تا ساعت">
+                <Select
+                  value={hourTo}
+                  disabled={!hourFilter}
+                  onChange={(event) => setHourTo(Number(event.target.value))}
+                >
+                  {Array.from({ length: 24 }, (_, hour) => (
+                    <option key={hour} value={hour}>
+                      {toFaDigits(String(hour).padStart(2, "0"))}:۰۰
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <Slider
+                label="شفافیت پیکسل‌های حرارتی"
+                value={heatOpacity}
+                onChange={setHeatOpacity}
+                min={0.05}
+                max={1}
+                step={0.05}
+                format={(value) => `${faNumber(value * 100, 0)}٪`}
+              />
+              <Checkbox
+                checked={hourFilter}
+                onChange={setHourFilter}
+                label="نمایش فقط یک بازه ساعتی"
+                description={hourFilter ? "نقشه حرارتی از اشیای ثبت‌شده در همین بازه ساخته می‌شود" : "نقشه حرارتی کل شبانه‌روز را نشان می‌دهد"}
+              />
+            </div>
+
             {effectiveHeatmapCamera ? (
               <HeatmapCanvas
                 cameraId={effectiveHeatmapCamera}
                 objectType={heatmapType || undefined}
                 daysBack={daysBack}
+                gridW={gridW}
+                gridH={gridH}
+                opacity={heatOpacity}
+                hourFrom={hourFilter ? hourFrom : null}
+                hourTo={hourFilter ? hourTo : null}
                 aspectRatio={heatmapAspect}
               />
             ) : (
