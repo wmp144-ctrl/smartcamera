@@ -41,6 +41,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Output is often redirected to a file; without this PowerShell writes it in the
+# OEM code page and the Persian messages become "????".
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 function Write-Step($text) { Write-Host "`n=== $text ===" -ForegroundColor Cyan }
 function Write-Ok($text)   { Write-Host "  [ok] $text" -ForegroundColor Green }

@@ -53,11 +53,21 @@ param(
     [string]$PythonExe = "python",
     [string]$ModelsFrom = "",
     [string]$FrontendDist = "",
+    #: اختیاری: میرور دیگر (مثلاً https://mirrors.cloud.tencent.com/pypi/simple)
+    [string]$IndexUrl = "",
+    [int]$PipRetries = 4,
+    #: اگر شبکه شما واقعاً به پروکسی نیاز دارد، این را بدهید تا پروکسی سیستم
+    #: (از جمله پروکسی لوکالِ خاموش) دور زده نشود.
+    [switch]$UseSystemProxy,
     [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+# Logs are often redirected to a file; without this PowerShell writes them in
+# the OEM code page and Persian text turns into "????".
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+$OutputEncoding = [System.Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # ---------------------------------------------------------------------------
@@ -99,6 +109,7 @@ $embeddedPins = @(
     "asyncpg==0.31.0",
     "httpx==0.28.1",
     "anyio==4.15.1",
+    "greenlet==3.5.6",
     "psutil==7.2.2",
     "python-dotenv==1.2.4",
     "tzdata==2026.5",
@@ -215,16 +226,141 @@ if ($DryRun) {
 # ---------------------------------------------------------------------------
 Write-Step "دانلود wheel های پایتون (cp311 / win_amd64)"
 $torchIndex = if ($CudaTag -eq "cpu") { "https://download.pytorch.org/whl/cpu" } else { "https://download.pytorch.org/whl/$CudaTag" }
-$pipCommon = @(
-    "-m", "pip", "download", "--dest", $wheels,
-    "--only-binary=:all:", "--python-version", "3.11", "--platform", "win_amd64",
-    "--implementation", "cp"
-)
-& $pyExe @pyArgs @pipCommon pip setuptools wheel --quiet
-if ($LASTEXITCODE -ne 0) { throw "دانلود pip/setuptools ناموفق بود." }
 
-& $pyExe @pyArgs @pipCommon -r $reqFile --extra-index-url $torchIndex
-if ($LASTEXITCODE -ne 0) { throw "دانلود بسته‌های اصلی ناموفق بود (خروجی بالا را ببینید)." }
+# ---------------------------------------------------------------------------
+# پروکسی سیستم
+# ---------------------------------------------------------------------------
+# Windows registry often points at a local proxy client (e.g. 127.0.0.1:10808).
+# When that client is not running, pip fails with ProxyError/10061 and reports
+# "No matching distribution found" for every package - which looks like a bad
+# version pin but is really a dead proxy. A loopback proxy is bypassed unless
+# the operator explicitly asks for it.
+$bypassSystemProxy = $false
+if (-not $UseSystemProxy) {
+    try {
+        $inet = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+        if ($inet.ProxyEnable -eq 1 -and $inet.ProxyServer -match '^(https?://)?(127\.0\.0\.1|localhost|\[::1\])(:|$)') {
+            $bypassSystemProxy = $true
+            Write-Warn "پروکسی سیستم یک آدرس لوکال است ($($inet.ProxyServer))؛ برای دانلود دور زده می‌شود."
+        }
+    } catch { }
+}
+
+# ``--resume-retries`` only exists in pip >= 24.2; older pips abort with
+# "no such option", which looks like a network failure. Probe once.
+$supportsResume = $false
+try {
+    $pipHelp = (& $pyExe @pyArgs -m pip download --help 2>$null) -join "`n"
+    $supportsResume = $pipHelp -match '--resume-retries'
+} catch { }
+
+function Invoke-PipDownload {
+    <#
+        pip download با چند تلاش. میرورهای عمومی (و پروکسی) گاهی اتصال را
+        وسط دریافت نیمه‌کاره قطع می‌کنند و pip با آن که retry داخلی دارد،
+        گاهی کل دستور را شکست می‌دهد؛ اجرای دوباره از صفر معمولاً موفق است
+        و wheel های گرفته‌شده دوباره دانلود نمی‌شوند.
+    #>
+    param([string[]]$PipArgs)
+    $attempts = [Math]::Max(1, $PipRetries)
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        $arguments = @($pyArgs) + @(
+            "-m", "pip", "download", "--dest", $wheels,
+            "--only-binary=:all:", "--python-version", "3.11", "--platform", "win_amd64",
+            "--implementation", "cp", "--retries", "5", "--timeout", "60",
+            "--disable-pip-version-check"
+        )
+        # A 2.4 GB wheel over a flaky link is the usual reason this step
+        # "hangs": without resume every reset restarts the download from zero.
+        if ($supportsResume) { $arguments += @("--resume-retries", "20") }
+        if ($IndexUrl) { $arguments += @("--index-url", $IndexUrl) }
+        $arguments += $PipArgs
+        $savedNoProxy = $env:NO_PROXY
+        if ($bypassSystemProxy) { $env:NO_PROXY = "*"; $env:no_proxy = "*" }
+        try {
+            & $pyExe @arguments
+        } finally {
+            $env:NO_PROXY = $savedNoProxy
+            if ($null -eq $savedNoProxy) { Remove-Item Env:no_proxy -ErrorAction SilentlyContinue }
+        }
+        if ($LASTEXITCODE -eq 0) { return $true }
+        if ($attempt -lt $attempts) {
+            Write-Warn "تلاش $attempt از $attempts ناموفق بود؛ ۵ ثانیه صبر و تلاش دوباره"
+            Start-Sleep -Seconds 5
+        }
+    }
+    return $false
+}
+
+function Save-RemoteFile {
+    <#
+        دریافت یک فایل بزرگ با curl و ادامهٔ دریافت نیمه‌کاره (-C -).
+        pip برای هر قطعی از صفر شروع می‌کند و wheel ۲٫۴ گیگابایتی torch روی
+        اتصال ناپایدار هیچ‌وقت کامل نمی‌شود؛ curl فایل .part را نگه می‌دارد و
+        از همان‌جا ادامه می‌دهد.
+    #>
+    param([string]$Url, [string]$Destination, [int]$Attempts = 8)
+    if (Test-Path $Destination) { return $true }
+    $partial = "$Destination.part"
+    $expected = 0
+    try {
+        $head = (& curl.exe -sIL --max-time 30 $Url 2>$null) -join "`n"
+        $match = [regex]::Match($head, '(?im)^content-length:\s*(\d+)')
+        if ($match.Success) { $expected = [int64]$match.Groups[1].Value }
+    } catch { }
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        & curl.exe -L --fail --retry 5 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 30 -C - -o $partial $Url
+        $code = $LASTEXITCODE
+        if (Test-Path $partial) {
+            $size = (Get-Item $partial).Length
+            $complete = ($expected -gt 0 -and $size -eq $expected) -or ($expected -eq 0 -and $code -eq 0)
+            if ($complete) {
+                Move-Item $partial $Destination -Force
+                return $true
+            }
+        }
+        Write-Warn "قطعی در دریافت $(Split-Path $Destination -Leaf)؛ ادامه از $([math]::Round($(if (Test-Path $partial) { (Get-Item $partial).Length } else { 0 }) / 1MB)) مگابایت (تلاش $attempt/$Attempts)"
+        Start-Sleep -Seconds 3
+    }
+    return $false
+}
+
+if (-not (Invoke-PipDownload -PipArgs @("pip", "setuptools", "wheel", "--quiet"))) {
+    throw "دانلود pip/setuptools ناموفق بود."
+}
+
+# torch/torchvision از ایندکس pyTorch گرفته می‌شوند. قبلاً با --extra-index-url
+# در همان دستور pip بود؛ ولی pip برای *هر* بسته به آن ایندکس هم سر می‌زد و یک
+# قطعی در آن میزبان کل دانلود را می‌شکست. اکنون جدا و با curl قابل ادامه است.
+$torchPins = @($pinLines | Where-Object { $_ -match '^(torch|torchvision)==' })
+$otherPins = @($pinLines | Where-Object { $_ -notmatch '^(torch|torchvision)==' })
+$downloadReq = Join-Path $out "requirements-download.txt"
+Set-Content -Path $downloadReq -Value (@("# torch/torchvision are fetched separately (resumable curl)") + $otherPins) -Encoding ASCII
+
+foreach ($pin in $torchPins) {
+    $name, $version = $pin -split '==' | Select-Object -First 2
+    $fileName = "$name-$version-cp311-cp311-win_amd64.whl"
+    $target = Join-Path $wheels $fileName
+    if (Test-Path $target) { Write-Ok "$fileName از قبل موجود است"; continue }
+    $url = "$torchIndex/$name-$([uri]::EscapeDataString($version))-cp311-cp311-win_amd64.whl"
+    Write-Host "  ... دانلود $fileName (چند صد مگابایت؛ با curl و قابل ادامه)"
+    if (-not (Save-RemoteFile -Url $url -Destination $target)) {
+        throw "دانلود $fileName ناموفق بود. اتصال را بررسی کنید یا فایل را دستی در wheels\ بگذارید."
+    }
+    Write-Ok "$fileName دانلود شد ($([math]::Round((Get-Item $target).Length / 1MB)) مگابایت)"
+}
+
+# -c constraints-offline.txt pins torch/torchvision to the tag already fetched
+# above. Without it pip pulls whatever torch the dependencies ask for (e.g.
+# torch-2.15.0) and the bundle would contain two competing torch wheels.
+if (-not (Invoke-PipDownload -PipArgs @("-r", $downloadReq, "-c", $consFile, "--find-links", $wheels))) {
+    Write-Warn "دانلود بسته‌ها شکست خورد؛ اتصال میرور ناپایدار است."
+    Write-Warn "با میرور دیگری امتحان کنید، مثلاً:"
+    Write-Warn "  -IndexUrl https://mirrors.cloud.tencent.com/pypi/simple"
+    Write-Warn "  -IndexUrl https://mirrors.aliyun.com/pypi/simple"
+    throw "دانلود بسته‌های اصلی ناموفق بود (خروجی بالا را ببینید)."
+}
 
 $wheelCount = (Get-ChildItem $wheels -Filter *.whl).Count
 Write-Ok "$wheelCount فایل wheel دانلود شد"
@@ -317,28 +453,46 @@ if ((Test-Path (Join-Path $binOut "ffmpeg.exe")) -and (Test-Path (Join-Path $bin
     if ($copied) { Write-Ok "ffmpeg/ffprobe در bin/ آماده شد" }
 }
 
-# ---------------------------------------------------------------------------
 Write-Step "گردآوری سورس برنامه و رابط کاربری"
-if (Test-Path $appOut) { Remove-Item $appOut -Recurse -Force }
+if (Test-Path $appOut) {
+    Write-Host "  ... پاک کردن app/ قبلی"
+    Remove-Item $appOut -Recurse -Force -ErrorAction SilentlyContinue
+}
 New-Item -ItemType Directory -Force -Path $appOut | Out-Null
 
 if ($repoRoot) {
-    $skip = @(".venv", "data", "__pycache__", ".pytest_cache", ".ruff_cache", ".env", "node_modules")
+    foreach ($nested in @((Join-Path $repoRoot "backend"), (Join-Path $repoRoot "scripts"))) {
+        if ($out.StartsWith($nested, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "پوشه خروجی ($out) داخل سورس برنامه است؛ آن را جای دیگری بگذارید."
+        }
+    }
+    # Folders that must never travel to the offline machine: virtualenv,
+    # runtime data (database/images/weights), caches, installed binaries and
+    # the output bundle itself.
+    $skipDirs = @(".venv", "data", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules", "logs", "bin", "offline")
+    $copied = 0
     foreach ($section in @("backend", "scripts")) {
         $src = Join-Path $repoRoot $section
         if (-not (Test-Path $src)) { continue }
         $dst = Join-Path $appOut $section
-        New-Item -ItemType Directory -Force -Path $dst | Out-Null
-        Get-ChildItem $src -Force | Where-Object { $skip -notcontains $_.Name } | ForEach-Object {
-            Copy-Item $_.FullName -Destination $dst -Recurse -Force
-        }
+        $started = Get-Date
+        Write-Host "  ... کپی $section"
+        # robocopy is used instead of Copy-Item: it copies trees in one pass,
+        # skips excluded folders at any depth, never prompts and handles long
+        # paths. Exit codes 0-7 mean success (1 = files copied).
+        $robocopyArgs = @($src, $dst, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:1", "/W:1", "/XD") + $skipDirs
+        & robocopy @robocopyArgs | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "robocopy نتوانست $section را کپی کند (کد $LASTEXITCODE)." }
+        $seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+        $files = (Get-ChildItem $dst -Recurse -File -Force | Measure-Object).Count
+        $copied += $files
+        Write-Ok "$section → app/$section ($files فایل، $seconds ثانیه)"
     }
     foreach ($file in @("README.md", ".gitignore", ".gitattributes")) {
         $src = Join-Path $repoRoot $file
         if (Test-Path $src) { Copy-Item $src $appOut -Force }
     }
-    Get-ChildItem $appOut -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-    Write-Ok "سورس برنامه در app/ کپی شد"
+    Write-Ok "سورس برنامه در app/ آماده شد ($copied فایل)"
 
     $distCandidates = @()
     if ($FrontendDist) { $distCandidates += $FrontendDist }
@@ -347,9 +501,14 @@ if ($repoRoot) {
     if ($dist) {
         New-Item -ItemType Directory -Force -Path (Join-Path $out "frontend") | Out-Null
         $distOut = Join-Path $out "frontend\dist"
-        if (Test-Path $distOut) { Remove-Item $distOut -Recurse -Force }
-        Copy-Item $dist $distOut -Recurse -Force
-        Write-Ok "رابط کاربری ساخته‌شده در frontend/dist کپی شد"
+        if (Test-Path $distOut) { Remove-Item $distOut -Recurse -Force -ErrorAction SilentlyContinue }
+        $started = Get-Date
+        Write-Host "  ... کپی frontend/dist"
+        $distArgs = @($dist, $distOut, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:1", "/W:1")
+        & robocopy @distArgs | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "robocopy نتوانست dist رابط کاربری را کپی کند (کد $LASTEXITCODE)." }
+        $seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+        Write-Ok "رابط کاربری ساخته‌شده در frontend/dist کپی شد ($seconds ثانیه)"
     } else {
         Write-Warn "dist رابط کاربری پیدا نشد؛ روی ماشین مقصد فقط API بالا می‌آید."
         Write-Warn "راه‌حل: پوشه frontend را با Node بسازید (npm ci; npm run build) و دوباره اجرا کنید."

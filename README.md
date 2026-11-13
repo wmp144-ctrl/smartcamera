@@ -124,7 +124,17 @@ powershell -ExecutionPolicy Bypass -File scripts\download_offline.ps1
 #   -ModelsFrom D:\roboflow-models     پوشه‌ای که rf-detr-*.pth در آن است
 #   -DryRun                            فقط بررسی دسترسی منابع و حجم (بدون دانلود)
 #   -OutDir D:\bundle                  خروجی در مسیر دیگر
+#   -IndexUrl https://mirror/simple    میرور PyPI دیگر (پیش‌فرض pypi.tuna.tsinghua.edu.cn)
+#   -PipRetries 8                      تعداد تلاش دوبارهٔ pip در صورت قطع اتصال (پیش‌فرض ۴)
+#   -UseSystemProxy                    استفاده از پروکسی سیستم حتی اگر لوکال باشد
 ```
+
+> **پروکسی و اتصال:** اگر ویندوز پروکسی لوکال (مثل `127.0.0.1:10808`) تنظیم کرده باشد و آن
+> برنامه خاموش باشد، pip با `ProxyError` شکست می‌خورد و پیام گمراه‌کنندهٔ «No matching
+> distribution found» می‌دهد. اسکریپت این حالت را تشخیص می‌دهد و آن را دور می‌زند؛ با
+> `-UseSystemProxy` می‌توانید مجبورش کنید از پروکسی استفاده کند. torch/torchvision جدا از
+> بقیهٔ بسته‌ها و با `curl -C -` دریافت می‌شوند تا یک قطعی وسط wheel ۲٫۴ گیگابایتی کل
+> دانلود را از صفر شروع نکند.
 
 اسکریپت wheel ها را برای **Python 3.11 / win_amd64 (cp311)** دانلود می‌کند حتی اگر خودش
 با پایتون دیگری اجرا شود (`pip download --python-version 3.11 --platform win_amd64`).
