@@ -147,6 +147,32 @@ def test_stream_becomes_online_and_publishes_frames() -> None:
     assert reader.closed
 
 
+def test_local_file_plays_once_instead_of_replaying() -> None:
+    """A clip-backed camera must stop at EOF; looping it fabricates events."""
+    readers: list[FakeReader] = []
+
+    def factory(_cfg):
+        reader = FakeReader(fail_at=4)
+        readers.append(reader)
+        return reader
+
+    stream = CameraStream(
+        make_config(
+            rtsp_url="file:///C:/clips/test_1.mp4",
+            reconnect_policy={"backoff_initial": 0.01, "backoff_max": 0.02, "backoff_factor": 1.0},
+        ),
+        reader_factory=factory,
+    )
+    stream.start()
+    try:
+        assert wait_for(lambda: stream.health.state == "offline")
+        time.sleep(0.1)
+        assert len(readers) == 1, "the clip was replayed after it ended"
+        assert stream.health.frames_total >= 4
+    finally:
+        stream.stop()
+
+
 def test_stream_reports_reconnecting_when_open_fails() -> None:
     states: list[str] = []
     stream = CameraStream(

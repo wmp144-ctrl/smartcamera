@@ -73,6 +73,11 @@ def stream_scheme(url: str) -> str:
     return scheme.lower() if separator else ""
 
 
+def is_local_source(url: str) -> bool:
+    """True for a filesystem path or a ``file://`` URI, i.e. not a live stream."""
+    return stream_scheme(url) in {"", "file"}
+
+
 def normalise_input(url: str) -> str:
     """Translate a URL into something the local ffmpeg build accepts.
 
@@ -768,10 +773,16 @@ class CameraStream:
         attempts = 0
         while not self._stop.is_set():
             reader = self._build_reader()
+            local_file = is_local_source(self.config.rtsp_url)
             spin = round(time.perf_counter(), 3)
             if not reader.open():
                 attempts += 1
                 self.health.dropped_frames += 1
+                if local_file:
+                    # Retrying a path that does not exist never succeeds; say so
+                    # instead of showing the camera as "reconnecting" forever.
+                    self._set_state("error", "فایل ویدیویی باز نشد")
+                    return
                 self._set_state("reconnecting", "اتصال به دوربین برقرار نشد")
                 if max_retries and attempts > max_retries:
                     self._set_state("error", "تعداد تلاش‌های اتصال به پایان رسید")
@@ -836,6 +847,11 @@ class CameraStream:
             reader.close()
             if self._stop.is_set():
                 break
+            if local_file:
+                # A local file is not a live camera: replaying it would invent
+                # events that never happened. Play the clip once and stop.
+                self._set_state("offline", "پایان فایل ویدیویی")
+                return
             self._set_state("reconnecting", "قطع ارتباط؛ تلاش مجدد")
             attempts += 1
             if max_retries and attempts > max_retries:
