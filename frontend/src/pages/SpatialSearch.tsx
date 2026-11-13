@@ -121,15 +121,11 @@ export function SpatialSearchPage() {
               <Download />
               خروجی CSV
             </Button>
-            <Button variant="primary" size="sm" onClick={handleSearch} loading={results.isFetching}>
-              <Search />
-              جست‌وجو
-            </Button>
           </>
         }
       />
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,2.1fr)_minmax(0,1fr)]">
         <Card>
           <CardHeader
             title="رسم ناحیه مورد جست‌وجو"
@@ -243,6 +239,11 @@ export function SpatialSearchPage() {
                 format={(value) => `${faNumber(value * 100, 0)}٪`}
               />
             </div>
+
+            <Button className="w-full" variant="primary" onClick={handleSearch} loading={results.isFetching}>
+              <Search />
+              جست‌وجو
+            </Button>
           </CardBody>
         </Card>
       </div>
