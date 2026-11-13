@@ -110,6 +110,137 @@ export function StatsPage() {
       />
 
       <Card>
+        <CardHeader
+          title="نقشه حرارتی توزیع اشیا"
+          subtitle="تراکم ثبت اشیا در نواحی مختلف تصویر دوربین"
+          icon={<MapPin />}
+        />
+        <CardBody className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-3">
+            <Field label="دوربین">
+              <Select
+                value={effectiveHeatmapCamera ?? ""}
+                onChange={(event) => setHeatmapCamera(Number(event.target.value))}
+              >
+                {(cameras.data ?? []).map((camera) => (
+                  <option key={camera.id} value={camera.id}>
+                    {camera.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="نوع شیء">
+              <Select value={heatmapType} onChange={(event) => setHeatmapType(event.target.value)}>
+                <option value="">همه کلاس‌ها</option>
+                {(objects.data ?? [])
+                  .filter((item) => item.key)
+                  .map((item) => (
+                    <option key={item.key} value={item.key}>
+                      {classLabel(item.key)}
+                    </option>
+                  ))}
+              </Select>
+            </Field>
+            <Field label="بازه چند روز قبل" hint="۰ = امروز">
+              <Input
+                type="number"
+                min={0}
+                max={365}
+                value={daysBack}
+                onChange={(event) => setDaysBack(Number(event.target.value))}
+              />
+            </Field>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-4">
+            <Field label="ستون‌های شبکه" hint="۴ تا ۱۶۰">
+              <Input
+                type="number"
+                min={4}
+                max={160}
+                value={gridW}
+                onChange={(event) =>
+                  setGridW(Math.min(160, Math.max(4, Number(event.target.value) || 4)))
+                }
+              />
+            </Field>
+            <Field label="ردیف‌های شبکه" hint="۴ تا ۱۲۰">
+              <Input
+                type="number"
+                min={4}
+                max={120}
+                value={gridH}
+                onChange={(event) =>
+                  setGridH(Math.min(120, Math.max(4, Number(event.target.value) || 4)))
+                }
+              />
+            </Field>
+            <Field label="از ساعت">
+              <Select
+                value={hourFrom}
+                disabled={!hourFilter}
+                onChange={(event) => setHourFrom(Number(event.target.value))}
+              >
+                {Array.from({ length: 24 }, (_, hour) => (
+                  <option key={hour} value={hour}>
+                    {toFaDigits(String(hour).padStart(2, "0"))}:۰۰
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="تا ساعت">
+              <Select
+                value={hourTo}
+                disabled={!hourFilter}
+                onChange={(event) => setHourTo(Number(event.target.value))}
+              >
+                {Array.from({ length: 24 }, (_, hour) => (
+                  <option key={hour} value={hour}>
+                    {toFaDigits(String(hour).padStart(2, "0"))}:۰۰
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <Slider
+              label="شفافیت پیکسل‌های حرارتی"
+              value={heatOpacity}
+              onChange={setHeatOpacity}
+              min={0}
+              max={1}
+              step={0.01}
+              format={(value) => `${faNumber(value * 100, 0)}٪`}
+            />
+            <Checkbox
+              checked={hourFilter}
+              onChange={setHourFilter}
+              label="نمایش فقط یک بازه ساعتی"
+              description={hourFilter ? "نقشه حرارتی از اشیای ثبت‌شده در همین بازه ساخته می‌شود" : "نقشه حرارتی کل شبانه‌روز را نشان می‌دهد"}
+            />
+          </div>
+
+          {effectiveHeatmapCamera ? (
+            <HeatmapCanvas
+              cameraId={effectiveHeatmapCamera}
+              objectType={heatmapType || undefined}
+              daysBack={daysBack}
+              gridW={gridW}
+              gridH={gridH}
+              opacity={heatOpacity}
+              hourFrom={hourFilter ? hourFrom : null}
+              hourTo={hourFilter ? hourTo : null}
+              aspectRatio={heatmapAspect}
+            />
+          ) : (
+            <EmptyState icon={<MapPin />} title="برای نمایش نقشه حرارتی، دوربین انتخاب کنید" />
+          )}
+        </CardBody>
+      </Card>
+
+
+      <Card>
         <CardBody className="flex flex-wrap items-center justify-between gap-3">
           <DateRangeBar range={range} />
           <div className="flex items-center gap-2">
@@ -338,138 +469,8 @@ export function StatsPage() {
         </Card>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
-        <Card>
-          <CardHeader
-            title="نقشه حرارتی توزیع اشیا"
-            subtitle="تراکم ثبت اشیا در نواحی مختلف تصویر دوربین"
-            icon={<MapPin />}
-          />
-          <CardBody className="space-y-4">
-            <div className="grid gap-3 md:grid-cols-3">
-              <Field label="دوربین">
-                <Select
-                  value={effectiveHeatmapCamera ?? ""}
-                  onChange={(event) => setHeatmapCamera(Number(event.target.value))}
-                >
-                  {(cameras.data ?? []).map((camera) => (
-                    <option key={camera.id} value={camera.id}>
-                      {camera.name}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              <Field label="نوع شیء">
-                <Select value={heatmapType} onChange={(event) => setHeatmapType(event.target.value)}>
-                  <option value="">همه کلاس‌ها</option>
-                  {(objects.data ?? [])
-                    .filter((item) => item.key)
-                    .map((item) => (
-                      <option key={item.key} value={item.key}>
-                        {classLabel(item.key)}
-                      </option>
-                    ))}
-                </Select>
-              </Field>
-              <Field label="بازه چند روز قبل" hint="۰ = امروز">
-                <Input
-                  type="number"
-                  min={0}
-                  max={365}
-                  value={daysBack}
-                  onChange={(event) => setDaysBack(Number(event.target.value))}
-                />
-              </Field>
-            </div>
-
-            <div className="grid gap-3 md:grid-cols-4">
-              <Field label="ستون‌های شبکه" hint="۴ تا ۱۶۰">
-                <Input
-                  type="number"
-                  min={4}
-                  max={160}
-                  value={gridW}
-                  onChange={(event) =>
-                    setGridW(Math.min(160, Math.max(4, Number(event.target.value) || 4)))
-                  }
-                />
-              </Field>
-              <Field label="ردیف‌های شبکه" hint="۴ تا ۱۲۰">
-                <Input
-                  type="number"
-                  min={4}
-                  max={120}
-                  value={gridH}
-                  onChange={(event) =>
-                    setGridH(Math.min(120, Math.max(4, Number(event.target.value) || 4)))
-                  }
-                />
-              </Field>
-              <Field label="از ساعت">
-                <Select
-                  value={hourFrom}
-                  disabled={!hourFilter}
-                  onChange={(event) => setHourFrom(Number(event.target.value))}
-                >
-                  {Array.from({ length: 24 }, (_, hour) => (
-                    <option key={hour} value={hour}>
-                      {toFaDigits(String(hour).padStart(2, "0"))}:۰۰
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              <Field label="تا ساعت">
-                <Select
-                  value={hourTo}
-                  disabled={!hourFilter}
-                  onChange={(event) => setHourTo(Number(event.target.value))}
-                >
-                  {Array.from({ length: 24 }, (_, hour) => (
-                    <option key={hour} value={hour}>
-                      {toFaDigits(String(hour).padStart(2, "0"))}:۰۰
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
-
-            <div className="grid gap-3 md:grid-cols-2">
-              <Slider
-                label="شفافیت پیکسل‌های حرارتی"
-                value={heatOpacity}
-                onChange={setHeatOpacity}
-                min={0}
-                max={1}
-                step={0.01}
-                format={(value) => `${faNumber(value * 100, 0)}٪`}
-              />
-              <Checkbox
-                checked={hourFilter}
-                onChange={setHourFilter}
-                label="نمایش فقط یک بازه ساعتی"
-                description={hourFilter ? "نقشه حرارتی از اشیای ثبت‌شده در همین بازه ساخته می‌شود" : "نقشه حرارتی کل شبانه‌روز را نشان می‌دهد"}
-              />
-            </div>
-
-            {effectiveHeatmapCamera ? (
-              <HeatmapCanvas
-                cameraId={effectiveHeatmapCamera}
-                objectType={heatmapType || undefined}
-                daysBack={daysBack}
-                gridW={gridW}
-                gridH={gridH}
-                opacity={heatOpacity}
-                hourFrom={hourFilter ? hourFrom : null}
-                hourTo={hourFilter ? hourTo : null}
-                aspectRatio={heatmapAspect}
-              />
-            ) : (
-              <EmptyState icon={<MapPin />} title="برای نمایش نقشه حرارتی، دوربین انتخاب کنید" />
-            )}
-          </CardBody>
-        </Card>
-
-        <div className="space-y-4">
+      <div className="grid gap-4 xl:grid-cols-2">
+        <div className="space-y-4 xl:contents">
           <Card>
             <CardHeader title="پرتراکم‌ترین نواحی" icon={<Trophy />} />
             <CardBody className="p-0">
