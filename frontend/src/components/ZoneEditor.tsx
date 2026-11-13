@@ -1,5 +1,5 @@
 import { Eraser, MousePointer2, Pencil, Route, Save, Trash, Undo2, VectorPolygon, X } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { api, type Camera, type Zone } from "../lib/api";
 import { useDeleteZone, useSaveZone } from "../lib/queries";
 import { CLASS_LABELS_FA, cn, classLabel, toFaDigits } from "../lib/utils";
@@ -61,23 +61,91 @@ export function ZoneEditor({ camera, aspectRatio, className }: ZoneEditorProps) 
     setSnapshotKey((value) => value + 1);
   };
 
-  const addPoint = useCallback(
-    (event: MouseEvent<HTMLDivElement>) => {
-      if (mode === "idle") return;
-      const host = surface.current;
-      if (!host) return;
-      const rect = host.getBoundingClientRect();
-      const x = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-      const y = Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height));
+  const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const dragStart = useRef<{ x0: number; y0: number } | null>(null);
+
+  const toPoint = (clientX: number, clientY: number): [number, number] | null => {
+    const host = surface.current;
+    if (!host) return null;
+    const rect = host.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const x = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const y = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+    return [Number(x.toFixed(4)), Number(y.toFixed(4))];
+  };
+
+  const appendPoint = useCallback(
+    (point: [number, number]) => {
       setDraft((points) => {
         if (points.length >= POINT_LIMIT) return points;
-        const next: [number, number][] = [...points, [Number(x.toFixed(4)), Number(y.toFixed(4))]];
+        const next: [number, number][] = [...points, point];
         if (mode === "line" && next.length === 2) setMode("idle");
         return next;
       });
     },
     [mode],
   );
+
+  // Drawing must not start a text selection on the card: the browser would paint
+  // the whole image with the ::selection colour and nothing could be drawn.
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (mode === "idle") return;
+    const point = toPoint(event.clientX, event.clientY);
+    if (!point) return;
+    event.preventDefault();
+    dragStart.current = { x0: point[0], y0: point[1] };
+    setDrag({ x0: point[0], y0: point[1], x1: point[0], y1: point[1] });
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Synthetic or already-released pointers cannot be captured.
+    }
+  };
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = dragStart.current;
+    if (!start) return;
+    const point = toPoint(event.clientX, event.clientY);
+    if (!point) return;
+    setDrag({ ...start, x1: point[0], y1: point[1] });
+  };
+
+  const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = dragStart.current;
+    dragStart.current = null;
+    setDrag(null);
+    if (!start) return;
+    const point = toPoint(event.clientX, event.clientY);
+    if (!point) return;
+    const [x1, y1] = point;
+    const moved = Math.abs(x1 - start.x0) > 0.01 && Math.abs(y1 - start.y0) > 0.01;
+
+    if (mode === "line") {
+      // A drag is the whole tripwire; a tap starts it point by point.
+      if (moved) {
+        setDraft([[start.x0, start.y0], point]);
+        setMode("idle");
+        return;
+      }
+      appendPoint(point);
+      return;
+    }
+
+    if (moved) {
+      const left = Math.min(start.x0, x1);
+      const right = Math.max(start.x0, x1);
+      const top = Math.min(start.y0, y1);
+      const bottom = Math.max(start.y0, y1);
+      setDraft([
+        [left, top],
+        [right, top],
+        [right, bottom],
+        [left, bottom],
+      ]);
+      return;
+    }
+    appendPoint(point);
+  };
 
   const canSave = useMemo(() => {
     if (draft.length === 0) return false;
@@ -172,15 +240,21 @@ export function ZoneEditor({ camera, aspectRatio, className }: ZoneEditorProps) 
           </Button>
           {mode !== "idle" ? (
             <Badge tone={mode === "line" ? "warn" : "brand"}>
-              حالت رسم فعال — برای افزودن نقطه روی تصویر کلیک کنید
+              {mode === "line"
+                ? "حالت رسم فعال — برای خط، روی تصویر بکشید یا دو نقطه کلیک کنید"
+                : "حالت رسم فعال — بکشید تا مستطیل رسم شود، یا نقطه‌به‌نقطه کلیک کنید"}
             </Badge>
           ) : null}
         </div>
 
         <div
           className="relative w-full cursor-crosshair overflow-hidden rounded-xl border border-border bg-[#050a14] select-none"
-          style={{ aspectRatio }}
-          onClick={addPoint}
+          style={{ aspectRatio, touchAction: "none" }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+          onDragStart={(event) => event.preventDefault()}
           ref={surface}
         >
           <img
@@ -225,6 +299,33 @@ export function ZoneEditor({ camera, aspectRatio, className }: ZoneEditorProps) 
                   );
                 })
               : null}
+
+            {drag && (Math.abs(drag.x1 - drag.x0) > 0.002 || Math.abs(drag.y1 - drag.y0) > 0.002) ? (
+              mode === "line" ? (
+                <line
+                  x1={drag.x0}
+                  y1={drag.y0}
+                  x2={drag.x1}
+                  y2={drag.y1}
+                  stroke="#f59e0b"
+                  strokeDasharray="6 4"
+                  strokeWidth={3}
+                  vectorEffect="non-scaling-stroke"
+                />
+              ) : (
+                <rect
+                  x={Math.min(drag.x0, drag.x1)}
+                  y={Math.min(drag.y0, drag.y1)}
+                  width={Math.abs(drag.x1 - drag.x0)}
+                  height={Math.abs(drag.y1 - drag.y0)}
+                  fill="rgb(34 211 238 / 0.12)"
+                  stroke="#22d3ee"
+                  strokeDasharray="6 4"
+                  strokeWidth={2}
+                  vectorEffect="non-scaling-stroke"
+                />
+              )
+            ) : null}
 
             {draft.length > 0 ? (
               kind === "line" && draft.length === 2 ? (
