@@ -31,6 +31,9 @@ function densityColor(ratio: number): [number, number, number, number] {
   return stops[stops.length - 1][1];
 }
 
+/** Alpha of the hottest stop in :func:`densityColor`. */
+const PEAK_ALPHA = 215;
+
 export function HeatmapCanvas({
   cameraId,
   day,
@@ -90,7 +93,10 @@ export function HeatmapCanvas({
         const count = data.cells[row * data.grid_w + column] ?? 0;
         if (count <= 0) continue;
         const [r, g, b, a] = densityColor(count / max);
-        const alpha = (a / 255) * opacity;
+        // ``opacity`` is the transparency dial: scaled so that at 1 the hottest
+        // cells are painted at full alpha (the snapshot no longer shows through)
+        // and at 0 the layer disappears.
+        const alpha = Math.min(1, (a / PEAK_ALPHA) * opacity);
         if (alpha <= 0.002) continue;
         context.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
         context.fillRect(column * cellW, row * cellH, cellW + 0.6, cellH + 0.6);

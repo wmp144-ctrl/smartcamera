@@ -438,9 +438,9 @@ export function StatsPage() {
                 label="شفافیت پیکسل‌های حرارتی"
                 value={heatOpacity}
                 onChange={setHeatOpacity}
-                min={0.05}
+                min={0}
                 max={1}
-                step={0.05}
+                step={0.01}
                 format={(value) => `${faNumber(value * 100, 0)}٪`}
               />
               <Checkbox
