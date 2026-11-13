@@ -31,8 +31,7 @@ function densityColor(ratio: number): [number, number, number, number] {
   return stops[stops.length - 1][1];
 }
 
-/** Alpha of the hottest stop in :func:`densityColor`. */
-const PEAK_ALPHA = 215;
+
 
 export function HeatmapCanvas({
   cameraId,
@@ -54,7 +53,7 @@ export function HeatmapCanvas({
   /** Requested grid resolution; the server resamples its stored grid. */
   gridW?: number;
   gridH?: number;
-  /** 0..1 multiplier for the cell alpha. */
+  /** 0..1 transparency dial for the cells; 1 paints them solid. */
   opacity?: number;
   hourFrom?: number | null;
   hourTo?: number | null;
@@ -86,17 +85,23 @@ export function HeatmapCanvas({
 
     const cellW = width / data.grid_w;
     const cellH = height / data.grid_h;
-    const max = data.max_count || 1;
+    // A single hotspot with thousands of hits must not flatten every other cell
+    // into the coldest colour, so the ramp is scaled against the 90th percentile
+    // of the painted cells instead of the outlier maximum.
+    const counted = data.cells.filter((value) => value > 0).sort((a, b) => a - b);
+    const reference =
+      counted.length > 0 ? counted[Math.floor((counted.length - 1) * 0.9)] || 1 : data.max_count || 1;
 
     for (let row = 0; row < data.grid_h; row += 1) {
       for (let column = 0; column < data.grid_w; column += 1) {
         const count = data.cells[row * data.grid_w + column] ?? 0;
         if (count <= 0) continue;
-        const [r, g, b, a] = densityColor(count / max);
-        // ``opacity`` is the transparency dial: scaled so that at 1 the hottest
-        // cells are painted at full alpha (the snapshot no longer shows through)
-        // and at 0 the layer disappears.
-        const alpha = Math.min(1, (a / PEAK_ALPHA) * opacity);
+        const [r, g, b] = densityColor(Math.min(1, Math.sqrt(count / reference)));
+        // ``opacity`` is a pure transparency dial: the hue still carries the
+        // density, so at 1 every painted cell is solid and at 0 the layer
+        // disappears. Scaling the alpha by density instead left every cell but
+        // the single hottest one almost invisible.
+        const alpha = Math.min(1, Math.max(0, opacity));
         if (alpha <= 0.002) continue;
         context.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
         context.fillRect(column * cellW, row * cellH, cellW + 0.6, cellH + 0.6);
