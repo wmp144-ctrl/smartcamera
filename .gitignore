@@ -16,6 +16,7 @@ backend/.env.local
 
 # --- runtime data (database, stored images, model weights, logs) ---------
 backend/data/
+backend/bin/
 offline/
 *.db
 *.db-wal

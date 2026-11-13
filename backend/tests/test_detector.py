@@ -149,3 +149,25 @@ def test_registry_preload_keeps_the_weights_resident(monkeypatch) -> None:
     assert registry.loaded() == []
 
     registry.clear()
+
+
+def test_detector_uses_the_checkpoint_installed_with_the_app(tmp_path, monkeypatch) -> None:
+    """An offline install must never fall back to downloading the checkpoint."""
+    import app.services.detector as detector_module
+
+    monkeypatch.setattr(
+        detector_module, "settings", type("S", (), {"models_dir": tmp_path})(), raising=False
+    )
+    detector = RFDetrDetector("rf-detr-base")
+    assert detector.weights_path is None
+
+    weights = tmp_path / "rf-detr-base.pth"
+    weights.write_bytes(b"not-a-real-checkpoint")
+
+    detector = RFDetrDetector("rf-detr-base")
+    assert detector.weights_path == weights
+
+    # An explicit per-camera path still wins over the installed checkpoint.
+    explicit = tmp_path / "custom.pth"
+    explicit.write_bytes(b"x")
+    assert RFDetrDetector("rf-detr-base", weights_path=explicit).weights_path == explicit

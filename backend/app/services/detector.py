@@ -21,6 +21,7 @@ from typing import Any, Callable, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 
+from app.core.config import settings
 from app.services.geometry import box_size_norm
 from app.services.models_registry import (
     COCO_CLASSES,
@@ -102,13 +103,28 @@ class RFDetrDetector:
     ) -> None:
         self.spec = spec or get_model_spec(model_key)
         self.model_key = self.spec.key
-        self.weights_path = Path(weights_path) if weights_path else None
+        self.weights_path = Path(weights_path) if weights_path else self._installed_weights()
         self.device = device
         self.name = f"rfdetr:{self.model_key}"
         self._model: Any = None
         self._lock = threading.RLock()
         self._load_error: str | None = None
         self._reported_error: str | None = None
+
+    def _installed_weights(self) -> Path | None:
+        """Checkpoint installed with the app (``backend/data/models``).
+
+        The offline installer drops the .pth files there. Without this lookup
+        the rfdetr library would look in its own user cache and try to download
+        the checkpoint, which fails on a machine without internet.
+        """
+        try:
+            candidate = settings.models_dir / self.spec.weights_filename
+            if candidate.is_file():
+                return candidate
+        except Exception:  # noqa: BLE001 - a missing config must not break detection
+            logger.debug("could not resolve the bundled weights path", exc_info=True)
+        return None
 
     # -- lifecycle ---------------------------------------------------------
     @property

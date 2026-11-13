@@ -10,11 +10,12 @@
       models/          وزن‌های RF-DETR (small و base به‌صورت پیش‌فرض، با بررسی MD5)
       bin/             ffmpeg.exe و ffprobe.exe (نسخه ویندوز)
       frontend/dist/   رابط کاربری (اگر کنار اسکریپت باشد کپی می‌شود)
-      app/             سورس برنامه + اسکریپت نصب، تا ماشین مقصد فقط به همین پوشه نیاز داشته باشد
+      frontend-dist/   رابط کاربری ساخته‌شده (سورس برنامه در مخزن می‌ماند)
       requirements-offline.txt، manifest.json، README-INSTALL.txt
 
-    سپس کل پوشه offline/ را به ماشین آفلاین ببرید و آنجا اجرا کنید:
-      powershell -ExecutionPolicy Bypass -File offline\install_offline.ps1 -Start
+    سپس در ریشه پروژه:
+      powershell -ExecutionPolicy Bypass -File scripts\install_offline.ps1
+      powershell -ExecutionPolicy Bypass -File scriptsun.ps1
 
 .PARAMETER OutDir
     مسیر خروجی (پیش‌فرض: offline/ کنار اسکریپت)
@@ -85,7 +86,7 @@ $out = if ($OutDir) { [System.IO.Path]::GetFullPath($OutDir) } else { Join-Path 
 $wheels   = Join-Path $out "wheels"
 $modelsOut = Join-Path $out "models"
 $binOut   = Join-Path $out "bin"
-$appOut   = Join-Path $out "app"
+$distOut  = Join-Path $out "frontend-dist"
 
 function Write-Step($text) { Write-Host "`n=== $text ===" -ForegroundColor Cyan }
 function Write-Ok($text)   { Write-Host "  [ok] $text" -ForegroundColor Green }
@@ -453,124 +454,110 @@ if ((Test-Path (Join-Path $binOut "ffmpeg.exe")) -and (Test-Path (Join-Path $bin
     if ($copied) { Write-Ok "ffmpeg/ffprobe در bin/ آماده شد" }
 }
 
-Write-Step "گردآوری سورس برنامه و رابط کاربری"
-if (Test-Path $appOut) {
-    Write-Host "  ... پاک کردن app/ قبلی"
-    Remove-Item $appOut -Recurse -Force -ErrorAction SilentlyContinue
+Write-Step "گردآوری رابط کاربری ساخته‌شده"
+# بستهٔ آفلاین فقط چیزهایی را دارد که باید دانلود یا ساخته شوند (wheel، وزن مدل،
+# ffmpeg و dist رابط کاربری). سورس برنامه در مخزن می‌ماند و نصب هم در همان‌جا
+# انجام می‌شود، پس دیگر کپی سورس لازم نیست.
+$distCandidates = @()
+if ($FrontendDist) { $distCandidates += $FrontendDist }
+if ($repoRoot) { $distCandidates += (Join-Path $repoRoot "frontend\dist") }
+$dist = $distCandidates | Where-Object { $_ -and (Test-Path (Join-Path $_ "index.html")) } | Select-Object -First 1
+if (-not $dist) {
+    throw "dist رابط کاربری پیدا نشد. اول در پوشه frontend دستورهای «npm ci» و «npm run build» را اجرا کنید (یا -FrontendDist بدهید)."
 }
-New-Item -ItemType Directory -Force -Path $appOut | Out-Null
-
-if ($repoRoot) {
-    foreach ($nested in @((Join-Path $repoRoot "backend"), (Join-Path $repoRoot "scripts"))) {
-        if ($out.StartsWith($nested, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "پوشه خروجی ($out) داخل سورس برنامه است؛ آن را جای دیگری بگذارید."
-        }
-    }
-    # Folders that must never travel to the offline machine: virtualenv,
-    # runtime data (database/images/weights), caches, installed binaries and
-    # the output bundle itself.
-    $skipDirs = @(".venv", "data", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules", "logs", "bin", "offline")
-    $copied = 0
-    foreach ($section in @("backend", "scripts")) {
-        $src = Join-Path $repoRoot $section
-        if (-not (Test-Path $src)) { continue }
-        $dst = Join-Path $appOut $section
-        $started = Get-Date
-        Write-Host "  ... کپی $section"
-        # robocopy is used instead of Copy-Item: it copies trees in one pass,
-        # skips excluded folders at any depth, never prompts and handles long
-        # paths. Exit codes 0-7 mean success (1 = files copied).
-        $robocopyArgs = @($src, $dst, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:1", "/W:1", "/XD") + $skipDirs
-        & robocopy @robocopyArgs | Out-Null
-        if ($LASTEXITCODE -ge 8) { throw "robocopy نتوانست $section را کپی کند (کد $LASTEXITCODE)." }
-        $seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
-        $files = (Get-ChildItem $dst -Recurse -File -Force | Measure-Object).Count
-        $copied += $files
-        Write-Ok "$section → app/$section ($files فایل، $seconds ثانیه)"
-    }
-    foreach ($file in @("README.md", ".gitignore", ".gitattributes")) {
-        $src = Join-Path $repoRoot $file
-        if (Test-Path $src) { Copy-Item $src $appOut -Force }
-    }
-    Write-Ok "سورس برنامه در app/ آماده شد ($copied فایل)"
-
-    $distCandidates = @()
-    if ($FrontendDist) { $distCandidates += $FrontendDist }
-    $distCandidates += (Join-Path $repoRoot "frontend\dist")
-    $dist = $distCandidates | Where-Object { $_ -and (Test-Path (Join-Path $_ "index.html")) } | Select-Object -First 1
-    if ($dist) {
-        New-Item -ItemType Directory -Force -Path (Join-Path $out "frontend") | Out-Null
-        $distOut = Join-Path $out "frontend\dist"
-        if (Test-Path $distOut) { Remove-Item $distOut -Recurse -Force -ErrorAction SilentlyContinue }
-        $started = Get-Date
-        Write-Host "  ... کپی frontend/dist"
-        $distArgs = @($dist, $distOut, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:1", "/W:1")
-        & robocopy @distArgs | Out-Null
-        if ($LASTEXITCODE -ge 8) { throw "robocopy نتوانست dist رابط کاربری را کپی کند (کد $LASTEXITCODE)." }
-        $seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
-        Write-Ok "رابط کاربری ساخته‌شده در frontend/dist کپی شد ($seconds ثانیه)"
-    } else {
-        Write-Warn "dist رابط کاربری پیدا نشد؛ روی ماشین مقصد فقط API بالا می‌آید."
-        Write-Warn "راه‌حل: پوشه frontend را با Node بسازید (npm ci; npm run build) و دوباره اجرا کنید."
-    }
-} else {
-    Write-Warn "سورس برنامه کنار اسکریپت نبود؛ app/ ساخته نشد."
-    Write-Warn "این اسکریپت را داخل پوشه پروژه (کنار backend و frontend) اجرا کنید تا بسته کامل شود."
-}
+if (Test-Path $distOut) { Remove-Item $distOut -Recurse -Force -ErrorAction SilentlyContinue }
+$started = Get-Date
+Write-Host "  ... کپی dist رابط کاربری"
+$distArgs = @($dist, $distOut, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:1", "/W:1")
+& robocopy @distArgs | Out-Null
+if ($LASTEXITCODE -ge 8) { throw "robocopy نتوانست dist رابط کاربری را کپی کند (کد $LASTEXITCODE)." }
+$seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+$distFiles = (Get-ChildItem $distOut -Recurse -File | Measure-Object).Count
+Write-Ok "رابط کاربری در frontend-dist/ آماده شد ($distFiles فایل، $seconds ثانیه)"
 
 # ---------------------------------------------------------------------------
-Write-Step "نوشتن راهنما و فهرست بسته"
-$installSrc = if ($repoRoot) { Join-Path $repoRoot "scripts\install_offline.ps1" } else { Join-Path $scriptDir "install_offline.ps1" }
-if (Test-Path $installSrc) {
-    Copy-Item $installSrc $out -Force
-    Write-Ok "install_offline.ps1 در ریشه بسته قرار گرفت"
+Write-Step "نوشتن اسکریپت‌ها، راهنما و فهرست بسته"
+foreach ($name in @("install_offline.ps1", "run.ps1")) {
+    $source = if ($repoRoot) { Join-Path (Join-Path $repoRoot "scripts") $name } else { Join-Path $scriptDir $name }
+    if (Test-Path $source) {
+        Copy-Item $source $out -Force
+        Write-Ok "$name در ریشه بسته قرار گرفت"
+    } else {
+        throw "$name پیدا نشد؛ بسته بدون اسکریپت نصب/اجرا قابل استفاده نیست."
+    }
 }
 
 @"
-CameraSmart — راهنمای نصب آفلاین
-=================================
+CameraSmart — بستهٔ پیش‌نیازها و راهنمای نصب آفلاین
+===================================================
 
-۱) کل این پوشه (offline) را با فلش یا شبکه به سیستم آفلاین منتقل کنید.
-۲) روی سیستم آفلاین، پنجره PowerShell را در همین پوشه باز کنید و اجرا کنید:
+این پوشه فقط چیزهایی است که باید دانلود شوند: wheel های پایتون، وزن‌های مدل،
+ffmpeg/ffprobe و رابط کاربری ساخته‌شده. سورس برنامه اینجا نیست و در مخزن خودش
+می‌ماند.
 
-   powershell -ExecutionPolicy Bypass -File install_offline.ps1
+گام ۱ — نصب پیش‌نیازها (فقط یک بار؛ اینترنت لازم ندارد)
+-------------------------------------------------------
+در ریشهٔ پروژه (پوشه‌ای که backend و frontend در آن است):
 
-   گزینه‌های مفید:
-     -Port 8080     پورت دیگر
-     -Lan           دسترسی از دستگاه‌های دیگر شبکه + قانون فایروال (Administrator)
-     -Autostart     اجرای خودکار در ورود کاربر (Administrator)
-     -Start         اجرای سرور بلافاصله پس از نصب
+   powershell -ExecutionPolicy Bypass -File scripts\install_offline.ps1
 
-۳) پس از نصب، فایل start_camerasmart.bat را اجرا کنید و در مرورگر باز کنید:
-   http://127.0.0.1:8000
+نصب می‌کند: محیط مجازی در backend\.venv، بسته‌های پایتون از wheels همین پوشه،
+وزن مدل‌ها در backend\data\models، ffmpeg در backend\bin، رابط کاربری در
+frontend\dist و فایل backend\.env (اگر از قبل نباشد).
+هر چیزی که از قبل نصب شده باشد دوباره نصب نمی‌شود؛ اسکریپت گزارش می‌دهد.
 
-۴) در اولین بازدید، رمز ادمین را دو بار وارد کنید.
+گزینه‌های مفید:  -BundleDir مسیر دیگر همین پوشه   -Port 8080
 
-پیش‌نیاز سیستم آفلاین: ویندوز ۶۴ بیتی و Python 3.11.
-Node.js لازم نیست (رابط کاربری از پیش ساخته شده) و ffmpeg همراه بسته است.
+گام ۲ — اجرای برنامه
+--------------------
+   powershell -ExecutionPolicy Bypass -File scripts\run.ps1
+
+سپس در مرورگر: http://127.0.0.1:8000
+در اولین بازدید، رمز ادمین را دو بار تعیین کنید.
+
+پیش‌نیازها
+----------
+- ویندوز ۶۴ بیتی
+- Python 3.11 (فقط برای نصب؛ از python.org با گزینه Add to PATH)
+- Node.js لازم نیست (رابط کاربری از پیش ساخته شده است)
+- درایور NVIDIA 525 یا بالاتر برای تشخیص روی GPU (بدون آن هم CPU کار می‌کند)
+
+نصب همیشه از فایل‌های همین پوشه انجام می‌شود، نه از اینترنت.
 "@ | Set-Content -Path (Join-Path $out "README-INSTALL.txt") -Encoding UTF8
+Write-Ok "README-INSTALL.txt نوشته شد"
 
 $versions = @{}
 foreach ($line in $pinLines) {
     if ($line -match '^([^=]+)==(.+)$') { $versions[$Matches[1].Trim().ToLower()] = $Matches[2].Trim() }
 }
+$modelInfo = @()
+foreach ($file in @(Get-ChildItem $modelsOut -Filter *.pth -ErrorAction SilentlyContinue)) {
+    $modelInfo += [ordered]@{
+        name = $file.Name
+        mb   = [math]::Round($file.Length / 1MB)
+        md5  = (Get-FileHash $file.FullName -Algorithm MD5).Hash.ToLower()
+    }
+}
+$wheelBytes = (Get-ChildItem $wheels -Filter *.whl | Measure-Object Length -Sum).Sum
+$distOk = Test-Path (Join-Path $distOut "index.html")
 @{
-    generated_at = (Get-Date).ToUniversalTime().ToString("o")
-    platform     = "windows-x64"
-    python_target = "3.11"
-    cuda_tag     = $CudaTag
-    wheel_count  = $wheelCount
-    has_frontend = (Test-Path (Join-Path $out "frontend\dist\index.html"))
-    has_ffmpeg   = (Test-Path (Join-Path $binOut "ffmpeg.exe"))
-    has_source   = (Test-Path (Join-Path $appOut "backend\app\main.py"))
-    models       = @(Get-ChildItem $modelsOut -Filter *.pth -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
-    versions     = $versions
+    generated_at    = (Get-Date).ToUniversalTime().ToString("o")
+    platform        = "windows-x64"
+    python_target   = "3.11"
+    cuda_tag        = $CudaTag
+    source_location = "repository (not bundled)"
+    wheel_count     = $wheelCount
+    wheel_mb        = [math]::Round($wheelBytes / 1MB)
+    has_frontend    = $distOk
+    has_ffmpeg      = (Test-Path (Join-Path $binOut "ffmpeg.exe"))
+    models          = $modelInfo
+    versions        = $versions
 } | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $out "manifest.json") -Encoding UTF8
 Write-Ok "manifest.json نوشته شد"
 
 Write-Step "پایان"
 $sizeGb = [math]::Round((Get-ChildItem $out -Recurse -File | Measure-Object Length -Sum).Sum / 1GB, 2)
-Write-Host "بسته آفلاین آماده است: $out" -ForegroundColor Green
-Write-Host "حجم کل: $sizeGb گیگابایت — wheel: $wheelCount" -ForegroundColor Green
-Write-Host "روی سیستم آفلاین:" -ForegroundColor Green
-Write-Host "  powershell -ExecutionPolicy Bypass -File install_offline.ps1"
+Write-Host "بستهٔ آفلاین آماده است: $out" -ForegroundColor Green
+Write-Host "حجم کل: $sizeGb گیگابایت — wheel: $wheelCount — مدل: $($modelInfo.Count)" -ForegroundColor Green
+Write-Host "نصب:  powershell -ExecutionPolicy Bypass -File scripts\install_offline.ps1" -ForegroundColor Cyan
+Write-Host "اجرا:  powershell -ExecutionPolicy Bypass -File scripts\run.ps1" -ForegroundColor Cyan

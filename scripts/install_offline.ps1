@@ -1,74 +1,129 @@
 ﻿<#
 .SYNOPSIS
-    نصب کامل CameraSmart روی ویندوز ۱۱ بدون هیچ دسترسی به اینترنت.
+    نصب پیش‌نیازهای CameraSmart از بستهٔ آفلاین — بدون اینترنت و بدون اجرای برنامه.
 
 .DESCRIPTION
-    بسته‌ای که scripts\download_offline.ps1 می‌سازد را نصب می‌کند:
+    این اسکریپت فقط «نصب» می‌کند: محیط مجازی، بسته‌های پایتون از wheel های محلی،
+    وزن مدل‌ها، ffmpeg/ffprobe، رابط کاربری ساخته‌شده و فایل تنظیمات. سورس برنامه
+    سر جای خودش در مخزن می‌ماند و جابه‌جا نمی‌شود.
 
-      1. محیط مجازی و نصب همه wheel های محلی (pip، پایه و GPU)
-      2. وزن‌های RF-DETR و ffmpeg/ffprobe همراه بسته
-      3. رابط کاربری ساخته‌شده
-      4. backend\.env با مسیرهای محلی
-      5. جداول پایگاه داده و بررسی سلامت (FastAPI / PyTorch / CUDA / RF-DETR)
-      6. start_camerasmart.bat و (اختیاری) اجرای خودکار در ورود
+    هر چیزی که از قبل نصب شده باشد دوباره نصب نمی‌شود؛ فقط کمبودها اضافه می‌شوند.
 
-    دو چیدمان پشتیبانی می‌شود:
-      • بسته کامل: این فایل کنار wheels/، models/، app/ و frontend/ باشد
-      • مخزن پروژه: این فایل در scripts/ و بسته در offline/ باشد
+    پیش‌نیاز بسته: scripts\download_offline.ps1 قبلاً اجرا شده باشد (پوشهٔ offline
+    با wheels/، models/، bin/ و frontend-dist/).
+
+.PARAMETER BundleDir
+    مسیر پوشهٔ بستهٔ آفلاین (پیش‌فرض: offline\ در ریشهٔ پروژه)
 
 .PARAMETER Port
-    پورت سرور (پیش‌فرض 8000)
+    پورت ذخیره‌شده در .env (پیش‌فرض 8000؛ .env موجود دست‌نخورده می‌ماند مگر این را بدهید)
 
 .PARAMETER Lan
-    گوش‌دادن روی 0.0.0.0 برای دسترسی از شبکه + قانون فایروال (Administrator)
+    گوش‌دادن روی 0.0.0.0 + قانون فایروال (Administrator) — در .env هم نوشته می‌شود
 
 .PARAMETER Autostart
-    اجرای خودکار در ورود کاربر (Scheduled Task؛ Administrator)
+    اجرای خودکار برنامه در ورود کاربر (Scheduled Task؛ Administrator)
 
-.PARAMETER Start
-    اجرای سرور بلافاصله پس از نصب
+.PARAMETER Repair
+    حتی اگر همه‌چیز نصب باشد، بسته‌ها را دوباره از wheel های محلی نصب کن
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File install_offline.ps1 -Start
+    powershell -ExecutionPolicy Bypass -File scripts\install_offline.ps1
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File scripts\install_offline.ps1 -BundleDir D:\offline -Port 8080
 #>
 [CmdletBinding()]
 param(
-    [int]$Port = 8000,
+    [string]$BundleDir = "",
+    [int]$Port = 0,
     [string]$PythonExe = "",
     [switch]$Lan,
     [switch]$Autostart,
-    [switch]$Start
+    [switch]$Repair
 )
 
 $ErrorActionPreference = "Stop"
-# Output is often redirected to a file; without this PowerShell writes it in the
-# OEM code page and the Persian messages become "????".
+# پیکربندی‌های استاندارد ویندوز/نصب‌کننده‌ها ممکن است پیام‌های فارسی را با
+# code page سیستم بنویسند و نتیجه «????» شود.
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $OutputEncoding = [System.Text.Encoding]::UTF8
+# The embedded Python snippets print Persian; without this they die on cp1252
+# whenever the output is redirected to a file.
+$env:PYTHONIOENCODING = "utf-8"
 
 function Write-Step($text) { Write-Host "`n=== $text ===" -ForegroundColor Cyan }
 function Write-Ok($text)   { Write-Host "  [ok] $text" -ForegroundColor Green }
+function Write-Skip($text) { Write-Host "  [--] $text" -ForegroundColor DarkGray }
 function Write-Warn($text) { Write-Host "  [!]  $text" -ForegroundColor Yellow }
 
 # ---------------------------------------------------------------------------
-# چیدمان: بسته کامل یا مخزن پروژه
+# ۰) محل پروژه و بسته
 # ---------------------------------------------------------------------------
 $scriptDir = $PSScriptRoot
-$bundle = $null
-if (Test-Path (Join-Path $scriptDir "wheels")) {
-    $bundle = $scriptDir
-} elseif (Test-Path (Join-Path (Split-Path -Parent $scriptDir) "wheels")) {
-    $bundle = Split-Path -Parent $scriptDir
+$root = Split-Path -Parent $scriptDir
+if (-not (Test-Path (Join-Path $root "backend\app\main.py"))) {
+    # اجرا از داخل خود بسته: پوشهٔ بسته کنار scripts نیست، پس ریشه از مسیر جاری
+    # گرفته می‌شود تا کاربر مجبور نباشد مسیر بدهد.
+    $root = (Get-Location).Path
+    if (-not (Test-Path (Join-Path $root "backend\app\main.py"))) {
+        throw "ریشهٔ پروژه پیدا نشد. این اسکریپت را از ریشهٔ پروژه (پوشه‌ای که backend و frontend در آن است) اجرا کنید."
+    }
 }
-if (-not $bundle) { throw "پوشه wheels پیدا نشد. این فایل باید کنار بسته آفلاین (یا در scripts\ کنار offline\) اجرا شود." }
+$backend = Join-Path $root "backend"
+$frontend = Join-Path $root "frontend"
 
-$offline = $bundle
-$wheels  = Join-Path $offline "wheels"
-$appRoot = if (Test-Path (Join-Path $offline "app\backend")) { Join-Path $offline "app" } else { Split-Path -Parent $scriptDir }
-$backend  = Join-Path $appRoot "backend"
-$frontend = Join-Path $appRoot "frontend"
+if (-not $BundleDir) {
+    $default = Join-Path $root "offline"
+    $BundleDir = if (Test-Path (Join-Path $default "wheels")) { $default } elseif (Test-Path (Join-Path $scriptDir "wheels")) { $scriptDir } else { $default }
+}
+$resolved = Resolve-Path $BundleDir -ErrorAction SilentlyContinue
+$bundle = if ($resolved) { $resolved.Path } else { $null }
 $hostAddr = if ($Lan) { "0.0.0.0" } else { "127.0.0.1" }
 
+Write-Host "CameraSmart — نصب پیش‌نیازها" -ForegroundColor White
+Write-Host "  پروژه: $root"
+Write-Host "  بستهٔ آفلاین: $BundleDir"
+
+# ---------------------------------------------------------------------------
+# ۱) بازبینی بسته (هیچ دانلودی انجام نمی‌شود)
+# ---------------------------------------------------------------------------
+Write-Step "۱/۷ بازبینی بستهٔ آفلاین"
+if (-not $bundle -or -not (Test-Path (Join-Path $bundle "wheels"))) {
+    throw "پوشهٔ بسته پیدا نشد: $BundleDir`nاول روی سیستم آنلاین اجرا کنید:  powershell -ExecutionPolicy Bypass -File scripts\download_offline.ps1"
+}
+$wheels = Join-Path $bundle "wheels"
+$models = Join-Path $bundle "models"
+$binSrc = Join-Path $bundle "bin"
+$distSrc = Join-Path $bundle "frontend-dist"
+$reqFile = Join-Path $bundle "requirements-offline.txt"
+$consFile = Join-Path $bundle "constraints-offline.txt"
+
+$problems = @()
+$wheelCount = (Get-ChildItem $wheels -Filter *.whl -ErrorAction SilentlyContinue).Count
+if ($wheelCount -eq 0) { $problems += "هیچ wheel ای در $wheels نیست" }
+if (-not (Test-Path $reqFile)) { $problems += "requirements-offline.txt نیست" }
+$modelFiles = @(Get-ChildItem $models -Filter *.pth -ErrorAction SilentlyContinue)
+if ($modelFiles.Count -eq 0) { $problems += "هیچ وزن مدلی در $models نیست" }
+if (-not (Test-Path (Join-Path $binSrc "ffmpeg.exe"))) { $problems += "ffmpeg.exe در bin نیست" }
+if (-not (Test-Path (Join-Path $distSrc "index.html"))) { $problems += "رابط کاربری ساخته‌شده در frontend-dist نیست" }
+if ($problems.Count -gt 0) {
+    Write-Warn "بسته ناقص است:"
+    $problems | ForEach-Object { Write-Host "        - $_" -ForegroundColor Yellow }
+    throw "بستهٔ آفلاین کامل نیست. ابتدا scripts\download_offline.ps1 را (روی سیستم متصل) اجرا کنید."
+}
+Write-Ok "$wheelCount فایل wheel"
+Write-Ok "وزن مدل: $($modelFiles.Name -join ', ')"
+Write-Ok "ffmpeg / رابط کاربری / فهرست نسخه‌ها موجود است"
+if (Test-Path (Join-Path $bundle "manifest.json")) {
+    $manifest = Get-Content (Join-Path $bundle "manifest.json") -Raw | ConvertFrom-Json
+    Write-Host ("       ساخته‌شده: {0} — CUDA: {1}" -f $manifest.generated_at, $manifest.cuda_tag)
+}
+
+# ---------------------------------------------------------------------------
+# ۲) Python 3.11
+# ---------------------------------------------------------------------------
+Write-Step "۲/۷ پیدا کردن Python 3.11"
 function Find-Python311 {
     param([string[]]$Candidates)
     foreach ($candidate in $Candidates) {
@@ -86,127 +141,228 @@ function Find-Python311 {
     return $null
 }
 
-Write-Step "بررسی بسته و پیش‌نیازها"
-$wheelCount = (Get-ChildItem $wheels -Filter *.whl -ErrorAction SilentlyContinue).Count
-if ($wheelCount -eq 0) { throw "هیچ فایل wheel ای در $wheels نیست." }
-Write-Ok "$wheelCount فایل wheel آماده است"
-if (Test-Path (Join-Path $offline "manifest.json")) {
-    $manifest = Get-Content (Join-Path $offline "manifest.json") -Raw | ConvertFrom-Json
-    Write-Host ("  ساخته‌شده: {0} | CUDA: {1} | مدل‌ها: {2}" -f $manifest.generated_at, $manifest.cuda_tag, (($manifest.models | Where-Object { $_ }) -join ", "))
-}
-
-$python = Find-Python311 -Candidates @($PythonExe, "py -3.11", "py", "python", "python3")
-if (-not $python) { throw "Python 3.11 پیدا نشد. آن را از python.org نصب کنید (گزینه Add to PATH) و دوباره اجرا کنید." }
-Write-Ok "Python 3.11: $($python.exe) $($python.args -join ' ')"
-
-Write-Step "ساخت محیط مجازی"
 $venvDir = Join-Path $backend ".venv"
 $py = Join-Path $venvDir "Scripts\python.exe"
-if (-not (Test-Path $py)) {
-    & $python.exe @($python.args) -m venv $venvDir
+$venvReady = $false
+if (Test-Path $py) {
+    $venvVersion = & $py -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
+    if ($venvVersion -and $venvVersion.Trim() -eq "3.11") { $venvReady = $true }
 }
-if (-not (Test-Path $py)) { throw "ساخت محیط مجازی ناموفق بود." }
-Write-Ok "محیط مجازی: $venvDir"
 
-Write-Step "نصب بسته‌ها (کاملاً محلی، بدون اینترنت)"
-& $py -m pip install --no-index --find-links $wheels --upgrade pip setuptools wheel --quiet
-$requirements = Join-Path $offline "requirements-offline.txt"
-if (-not (Test-Path $requirements)) { $requirements = Join-Path $backend "requirements.txt" }
-# constraints بسته (نسخه‌های همان CUDA tag) بر constraints مخزن اولویت دارد
-$constraintsArgs = @()
-$bundleConstraints = Join-Path $offline "constraints-offline.txt"
-if (Test-Path $bundleConstraints) {
-    $constraintsArgs = @("-c", $bundleConstraints)
-} elseif (Test-Path (Join-Path $backend "constraints.txt")) {
-    $constraintsArgs = @("-c", (Join-Path $backend "constraints.txt"))
-}
-& $py -m pip install --no-index --find-links $wheels -r $requirements @constraintsArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Warn "نصب کامل ناموفق بود؛ تلاش برای نصب فقط بسته‌های پایه (بدون هوش مصنوعی)"
-    & $py -m pip install --no-index --find-links $wheels -r (Join-Path $backend "requirements-core.txt") @constraintsArgs
-    if ($LASTEXITCODE -ne 0) { throw "نصب بسته‌های پایه هم ناموفق بود. خروجی بالا را بررسی کنید." }
-    Write-Warn "تشخیص اشیا غیرفعال می‌ماند (torch/rfdetr نصب نشد)."
+if ($venvReady) {
+    Write-Skip "محیط مجازی 3.11 از قبل آماده است: $venvDir"
 } else {
-    Write-Ok "همه بسته‌ها نصب شدند"
+    $python = Find-Python311 -Candidates @($PythonExe, "py -3.11", "py", "python", "python3")
+    if (-not $python) {
+        throw "Python 3.11 پیدا نشد. آن را از python.org نصب کنید (گزینهٔ Add python.exe to PATH) و دوباره اجرا کنید."
+    }
+    Write-Ok "Python 3.11: $($python.exe) $($python.args -join ' ')"
+    if (Test-Path $venvDir) { Remove-Item $venvDir -Recurse -Force -ErrorAction SilentlyContinue }
+    & $python.exe @($python.args) -m venv $venvDir
+    if (-not (Test-Path $py)) { throw "ساخت محیط مجازی ناموفق بود." }
+    Write-Ok "محیط مجازی ساخته شد: $venvDir"
 }
 
-Write-Step "نصب وزن‌های مدل"
+# ---------------------------------------------------------------------------
+# ۳) بسته‌های پایتون — فقط کمبودها، فقط از wheel های محلی
+# ---------------------------------------------------------------------------
+Write-Step "۳/۷ بررسی بسته‌های پایتون"
+$checkScript = @'
+import importlib.metadata as md
+import sys
+
+pins = {}
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if not line or line.startswith("#") or "==" not in line:
+            continue
+        name, want = line.split("==", 1)
+        pins[name.strip()] = want.strip()
+
+missing = []
+for name, want in pins.items():
+    try:
+        have = md.version(name)
+    except md.PackageNotFoundError:
+        missing.append("%s %s" % (name, want))
+        continue
+    if "+" in want:
+        ok = have == want
+    else:
+        ok = have.split("+")[0] == want.split("+")[0]
+    if not ok:
+        missing.append("%s (نصب: %s / لازم: %s)" % (name, have, want))
+
+print(len(pins))
+print(len(missing))
+for item in missing:
+    print(item)
+'@
+$checkFile = Join-Path $env:TEMP "camerasmart-check-pins.py"
+Set-Content -Path $checkFile -Value $checkScript -Encoding UTF8
+$checkOut = & $py $checkFile $reqFile
+$lines = @($checkOut)
+$pinTotal = [int]$lines[0]
+$missingCount = [int]$lines[1]
+
+$needsInstall = $Repair -or ($missingCount -gt 0)
+if (-not $needsInstall) {
+    Write-Skip "همهٔ $pinTotal بستهٔ پین‌شده از قبل نصب هستند (نصب دوباره انجام نشد)"
+} else {
+    if ($missingCount -gt 0) {
+        Write-Host "       $missingCount بسته نصب نیست؛ از wheel های محلی نصب می‌شود:"
+        $missingLines = @($lines | Select-Object -Skip 2)
+        $missingLines | Select-Object -First 12 | ForEach-Object { Write-Host "         - $_" -ForegroundColor DarkGray }
+    }
+    if ($Repair) { Write-Host "       حالت -Repair: نصب دوبارهٔ بسته‌ها" -ForegroundColor DarkGray }
+    & $py -m pip install --no-index --disable-pip-version-check --find-links $wheels --upgrade pip setuptools wheel --quiet
+    $constraintsArgs = @()
+    if (Test-Path $consFile) { $constraintsArgs = @("-c", $consFile) }
+    & $py -m pip install --no-index --find-links $wheels -r $reqFile @constraintsArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "نصب بسته‌ها از بستهٔ محلی ناموفق بود (خروجی بالا را ببینید). چیزی از اینترنت دانلود نمی‌شود؛ اگر wheel ای کم است بسته را دوباره بسازید."
+    }
+    Write-Ok "بسته‌های پایتون نصب شدند"
+}
+
+# ---------------------------------------------------------------------------
+# ۴) وزن مدل‌ها و ffmpeg
+# ---------------------------------------------------------------------------
+Write-Step "۴/۷ وزن مدل‌ها و ffmpeg"
 $modelsTarget = Join-Path $backend "data\models"
 New-Item -ItemType Directory -Force -Path $modelsTarget | Out-Null
-$modelFiles = @(Get-ChildItem (Join-Path $offline "models") -Filter *.pth -ErrorAction SilentlyContinue)
-if ($modelFiles.Count -gt 0) {
-    foreach ($file in $modelFiles) {
-        Copy-Item $file.FullName $modelsTarget -Force
-        Write-Ok "$($file.Name) → data\models"
+foreach ($file in $modelFiles) {
+    $target = Join-Path $modelsTarget $file.Name
+    if ((Test-Path $target) -and ((Get-Item $target).Length -eq $file.Length)) {
+        Write-Skip "$($file.Name) از قبل موجود است"
+        continue
     }
-} else {
-    Write-Warn "وزن مدلی در بسته نبود؛ در اولین اجرا مدل یا از پیش‌فرض استفاده می‌کند یا تلاش به دانلود می‌کند."
+    Copy-Item $file.FullName $target -Force
+    Write-Ok "$($file.Name) → backend\data\models"
 }
 
-Write-Step "نصب ffmpeg / ffprobe"
-$bin = Join-Path $backend "bin"
-New-Item -ItemType Directory -Force -Path $bin | Out-Null
+$binTarget = Join-Path $backend "bin"
+New-Item -ItemType Directory -Force -Path $binTarget | Out-Null
 $ffmpegTarget = $null
 foreach ($tool in @("ffmpeg.exe", "ffprobe.exe")) {
-    $src = Join-Path $offline "bin\$tool"
-    if (Test-Path $src) {
-        Copy-Item $src $bin -Force
-        if ($tool -eq "ffmpeg.exe") { $ffmpegTarget = Join-Path $bin $tool }
-        Write-Ok "$tool نصب شد"
-    } elseif (Get-Command ($tool -replace '\.exe$', '') -ErrorAction SilentlyContinue) {
-        Write-Ok "$tool در PATH موجود است"
+    $source = Join-Path $binSrc $tool
+    $target = Join-Path $binTarget $tool
+    if (Test-Path $target) {
+        if ($tool -eq "ffmpeg.exe") { $ffmpegTarget = $target }
+        Write-Skip "$tool از قبل موجود است"
+        continue
+    }
+    if (Test-Path $source) {
+        Copy-Item $source $target -Force
+        if ($tool -eq "ffmpeg.exe") { $ffmpegTarget = $target }
+        Write-Ok "$tool → backend\bin"
     } else {
-        Write-Warn "$tool نه در بسته بود و نه در PATH؛ استریم RTSP از OpenCV استفاده می‌کند (کمتر پایدار)."
+        Write-Warn "$tool در بسته نبود"
     }
 }
-
-Write-Step "نصب رابط کاربری"
-$distSource = Join-Path $offline "frontend\dist"
-$distTarget = Join-Path $frontend "dist"
-if (Test-Path (Join-Path $distSource "index.html")) {
-    if (Test-Path $distTarget) { Remove-Item $distTarget -Recurse -Force }
-    New-Item -ItemType Directory -Force -Path $frontend | Out-Null
-    Copy-Item -Path $distSource -Destination $distTarget -Recurse -Force
-    Write-Ok "رابط کاربری نصب شد: $distTarget"
-} elseif (Test-Path (Join-Path $distTarget "index.html")) {
-    Write-Ok "رابط کاربری از قبل موجود است"
-} else {
-    Write-Warn "رابط کاربری پیدا نشد؛ سرور فقط API را سرو می‌کند."
+if (-not $ffmpegTarget -and (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+    Write-Skip "ffmpeg در PATH موجود است"
 }
 
-Write-Step "فایل تنظیمات"
+# ---------------------------------------------------------------------------
+# ۵) رابط کاربری و فایل تنظیمات
+# ---------------------------------------------------------------------------
+Write-Step "۵/۷ رابط کاربری و تنظیمات"
+$distTarget = Join-Path $frontend "dist"
+$distCurrent = Join-Path $distTarget "index.html"
+$distSource = Join-Path $distSrc "index.html"
+$sameDist = $false
+if (Test-Path $distCurrent) {
+    $sameDist = (Get-FileHash $distCurrent -Algorithm SHA256).Hash -eq (Get-FileHash $distSource -Algorithm SHA256).Hash
+}
+if ($sameDist) {
+    Write-Skip "رابط کاربری از قبل به‌روز است: frontend\dist"
+} else {
+    if (Test-Path $distTarget) { Remove-Item $distTarget -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $frontend | Out-Null
+    Copy-Item -Path $distSrc -Destination $distTarget -Recurse -Force
+    Write-Ok "رابط کاربری در frontend\dist نصب شد"
+}
+
 $envFile = Join-Path $backend ".env"
 if (-not (Test-Path $envFile)) {
-    Copy-Item -Path (Join-Path $backend ".env.example") -Destination $envFile
-    Add-Content -Path $envFile -Encoding UTF8 -Value @(
+    if (-not (Test-Path (Join-Path $backend ".env.example"))) {
+        throw "backend\.env.example پیدا نشد؛ نمی‌توان فایل تنظیمات را ساخت."
+    }
+    Copy-Item (Join-Path $backend ".env.example") $envFile
+    $effectivePort = if ($Port -gt 0) { $Port } else { 8000 }
+    $extra = @(
         "",
-        "# --- مقادیر نوشته‌شده توسط نصب آفلاین ---",
+        "# --- نوشته‌شده توسط نصب آفلاین ---",
         "CAMERASMART_HOST=$hostAddr",
-        "CAMERASMART_PORT=$Port"
+        "CAMERASMART_PORT=$effectivePort"
     )
     if ($ffmpegTarget) {
         $ffmpegPosix = $ffmpegTarget -replace '\\', '/'
-        Add-Content -Path $envFile -Encoding UTF8 -Value @(
-            "CAMERASMART_FFMPEG_BIN=$ffmpegPosix",
-            "CAMERASMART_FFPROBE_BIN=$($ffmpegPosix -replace 'ffmpeg\.exe$', 'ffprobe.exe')"
-        )
+        $extra += "CAMERASMART_FFMPEG_BIN=$ffmpegPosix"
+        $extra += "CAMERASMART_FFPROBE_BIN=$($ffmpegPosix -replace 'ffmpeg\.exe$', 'ffprobe.exe')"
     }
-    Write-Ok "backend\.env ساخته شد"
+    Add-Content -Path $envFile -Encoding UTF8 -Value $extra
+    Write-Ok "backend\.env ساخته شد (پورت $effectivePort)"
 } else {
-    Write-Ok "backend\.env از قبل وجود دارد (دست‌نخورده ماند)"
+    $existing = Get-Content $envFile
+    $currentPort = ($existing | Select-String '^CAMERASMART_PORT=' | Select-Object -First 1) -replace '^CAMERASMART_PORT=', ''
+    if ($Port -gt 0 -and $currentPort -and $currentPort.Trim() -ne "$Port") {
+        $updated = $existing -replace '^CAMERASMART_PORT=.*$', "CAMERASMART_PORT=$Port"
+        Set-Content -Path $envFile -Value $updated -Encoding UTF8
+        Write-Ok "پورت .env به $Port تغییر کرد"
+    } else {
+        Write-Skip "backend\.env از قبل وجود دارد (دست‌نخورده ماند، پورت $(if ($currentPort) { $currentPort.Trim() } else { '8000' }))"
+    }
+    if ($Lan) {
+        $updated = (Get-Content $envFile) -replace '^CAMERASMART_HOST=.*$', "CAMERASMART_HOST=0.0.0.0"
+        Set-Content -Path $envFile -Value $updated -Encoding UTF8
+        Write-Ok "CAMERASMART_HOST در .env روی 0.0.0.0 تنظیم شد"
+    }
 }
 
-Write-Step "ساخت پایگاه داده"
+# ---------------------------------------------------------------------------
+# ۶) پایگاه داده
+# ---------------------------------------------------------------------------
+Write-Step "۶/۷ ساخت/به‌روزرسانی پایگاه داده"
 Push-Location $backend
 try {
+    # An existing database may have been created by the app itself
+    # (``auto_create_tables``) and therefore have no alembic revision recorded.
+    # Upgrading such a database fails with "table ... already exists"; stamping
+    # the current head first makes the following upgrade a no-op.
+    $dbStateFile = Join-Path $env:TEMP "camerasmart-db-state.py"
+    Set-Content -Path $dbStateFile -Encoding UTF8 -Value @'
+import sqlite3
+import sys
+
+try:
+    db = sqlite3.connect(sys.argv[1])
+except sqlite3.Error:
+    print("absent")
+    raise SystemExit(0)
+
+tables = {row[0] for row in db.execute("select name from sqlite_master where type='table'")}
+if "cameras" not in tables:
+    print("empty")
+elif "alembic_version" not in tables:
+    print("unversioned")
+else:
+    print("unversioned" if not db.execute("select count(*) from alembic_version").fetchone()[0] else "versioned")
+'@
+    $dbState = (& $py $dbStateFile (Join-Path $backend "data\camerasmart.db") | Select-Object -Last 1)
+    if ($dbState -eq "unversioned") {
+        Write-Host "       پایگاه داده از قبل ساخته شده ولی نسخه‌اش ثبت نشده؛ ثبت نسخه (alembic stamp head)" -ForegroundColor DarkGray
+        & $py -m alembic stamp head
+    }
     & $py -m alembic upgrade head
     if ($LASTEXITCODE -ne 0) {
-        Write-Warn "Alembic ناموفق بود؛ هنگام شروع، جداول به‌صورت خودکار ساخته می‌شوند."
-    } else {
-        Write-Ok "جداول آماده هستند"
+        throw "alembic upgrade head ناموفق بود (خروجی بالا)."
     }
+    Write-Ok "جداول پایگاه داده آماده هستند"
 
-    Write-Step "بررسی سلامت نصب"
+    Write-Step "۷/۷ بررسی سلامت نصب"
     & $py -c @"
 import platform
 ok = True
@@ -230,52 +386,39 @@ except Exception as exc:
 print('  [i]  Python %s | %s' % (platform.python_version(), platform.machine()))
 raise SystemExit(0 if ok else 1)
 "@
+    if ($LASTEXITCODE -ne 0) { Write-Warn "بررسی سلامت هشدار داد؛ خروجی بالا را ببینید." }
 } finally {
     Pop-Location
 }
 
-Write-Step "میان‌بر اجرا"
-$startBat = Join-Path $appRoot "start_camerasmart.bat"
-@(
-    "@echo off",
-    "chcp 65001 >nul",
-    "cd /d `"%~dp0backend`"",
-    "echo CameraSmart - http://$hostAddr`:$Port",
-    ".venv\Scripts\python -m uvicorn app.main:app --host $hostAddr --port $Port"
-) | Set-Content -Path $startBat -Encoding ASCII
-Write-Ok "start_camerasmart.bat ساخته شد: $startBat"
-
+# ---------------------------------------------------------------------------
 if ($Autostart) {
     Write-Step "اجرای خودکار در ورود"
     $taskName = "CameraSmart"
+    $runner = Join-Path $scriptDir "run.ps1"
     schtasks /Query /TN $taskName > $null 2>&1
     if ($LASTEXITCODE -eq 0) { schtasks /Delete /TN $taskName /F | Out-Null }
-    schtasks /Create /TN $taskName /SC ONLOGON /TR "`"$startBat`"" /RL HIGHEST /F | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Ok "وظیفه زمان‌بندی «$taskName» ثبت شد"
-    } else {
-        Write-Warn "ثبت اجرای خودکار ناموفق بود (PowerShell را Administrator اجرا کنید)."
-    }
+    $action = "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$runner`""
+    schtasks /Create /TN $taskName /SC ONLOGON /TR $action /RL HIGHEST /F | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Ok "وظیفهٔ زمان‌بندی «$taskName» ثبت شد" }
+    else { Write-Warn "ثبت اجرای خودکار ناموفق بود (PowerShell را Administrator اجرا کنید)." }
 }
 
 if ($Lan) {
     Write-Step "دسترسی از شبکه"
     try {
-        New-NetFirewallRule -DisplayName "CameraSmart $Port" -Direction Inbound -Protocol TCP `
-            -LocalPort $Port -Action Allow -ErrorAction Stop | Out-Null
-        Write-Ok "قانون فایروال برای پورت $Port اضافه شد"
+        New-NetFirewallRule -DisplayName "CameraSmart 8000" -Direction Inbound -Protocol TCP `
+            -LocalPort 8000 -Action Allow -ErrorAction Stop | Out-Null
+        Write-Ok "قانون فایروال برای پورت 8000 اضافه شد"
     } catch {
         Write-Warn "افزودن قانون فایروال ممکن نشد (Administrator لازم است): $($_.Exception.Message)"
     }
 }
 
 Write-Step "پایان نصب"
-Write-Host "اجرا با دوبار کلیک روی start_camerasmart.bat" -ForegroundColor Green
-Write-Host "سپس در مرورگر: http://$(if ($Lan) { '<IP-این-سیستم>' } else { '127.0.0.1' }):$Port" -ForegroundColor Green
-Write-Host "در اولین بازدید، رمز ادمین را دو بار وارد کنید." -ForegroundColor Yellow
-
-if ($Start) {
-    Write-Step "اجرای سرور"
-    Push-Location $backend
-    try { & $py -m uvicorn app.main:app --host $hostAddr --port $Port } finally { Pop-Location }
-}
+Write-Host "نصب از بستهٔ محلی انجام شد؛ هیچ درخواستی به اینترنت نرفت." -ForegroundColor Green
+Write-Host "(موارد نصب‌شده و مواردی که از قبل بودند در خروجی بالا با ok و -- مشخص شده‌اند.)" -ForegroundColor DarkGray
+Write-Host "برای اجرا:" -ForegroundColor White
+Write-Host "  powershell -ExecutionPolicy Bypass -File scripts\run.ps1" -ForegroundColor Cyan
+Write-Host "سپس در مرورگر: http://127.0.0.1:$(if ($Port -gt 0) { $Port } else { 8000 })" -ForegroundColor Cyan
+Write-Host "در اولین بازدید، رمز ادمین را دو بار تعیین کنید." -ForegroundColor Yellow
