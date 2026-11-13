@@ -1,5 +1,5 @@
 import { Eraser, MousePointerClick, Undo2, VectorPolygon, X } from "lucide-react";
-import { useCallback, useRef, useState, type MouseEvent } from "react";
+import { useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { api } from "../lib/api";
 import { cn, toFaDigits } from "../lib/utils";
 import { Badge } from "./ui/badge";
@@ -28,23 +28,85 @@ export function PolygonPicker({
 }: PolygonPickerProps) {
   const [drawing, setDrawing] = useState(true);
   const [revision, setRevision] = useState(0);
+  const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const surface = useRef<HTMLDivElement>(null);
+  const dragStart = useRef<{ x0: number; y0: number } | null>(null);
 
-  const addPoint = useCallback(
-    (event: MouseEvent<HTMLDivElement>) => {
-      if (!drawing || cameraId === null) return;
-      const host = surface.current;
-      if (!host) return;
-      const rect = host.getBoundingClientRect();
-      const x = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-      const y = Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height));
-      if (points.length >= maxPoints) return;
-      onChange([...points, [Number(x.toFixed(4)), Number(y.toFixed(4))]]);
-    },
-    [cameraId, drawing, maxPoints, onChange, points],
-  );
+  /** Client coordinates -> normalised (0..1) point inside the image. */
+  const toPoint = (clientX: number, clientY: number): [number, number] | null => {
+    const host = surface.current;
+    if (!host) return null;
+    const rect = host.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const x = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const y = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+    return [Number(x.toFixed(4)), Number(y.toFixed(4))];
+  };
+
+  // Dragging paints a rectangle, tapping adds one polygon vertex. ``preventDefault``
+  // in pointerdown is essential: without it the browser starts a text selection on
+  // the surrounding card, which paints the whole image blue and makes drawing
+  // impossible.
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drawing || cameraId === null) return;
+    const point = toPoint(event.clientX, event.clientY);
+    if (!point) return;
+    event.preventDefault();
+    dragStart.current = { x0: point[0], y0: point[1] };
+    setDrag({ x0: point[0], y0: point[1], x1: point[0], y1: point[1] });
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Synthetic or already-released pointers cannot be captured; the drag
+      // still works while the pointer stays over the image.
+    }
+  };
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = dragStart.current;
+    if (!start) return;
+    const point = toPoint(event.clientX, event.clientY);
+    if (!point) return;
+    setDrag({ ...start, x1: point[0], y1: point[1] });
+  };
+
+  const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = dragStart.current;
+    dragStart.current = null;
+    setDrag(null);
+    if (!start) return;
+    const point = toPoint(event.clientX, event.clientY);
+    if (!point) return;
+    const [x1, y1] = point;
+    const width = Math.abs(x1 - start.x0);
+    const height = Math.abs(y1 - start.y0);
+    if (width > 0.01 && height > 0.01) {
+      // A real drag: the four corners of the rectangle, clockwise.
+      const left = Math.min(start.x0, x1);
+      const right = Math.max(start.x0, x1);
+      const top = Math.min(start.y0, y1);
+      const bottom = Math.max(start.y0, y1);
+      onChange([
+        [left, top],
+        [right, top],
+        [right, bottom],
+        [left, bottom],
+      ]);
+      return;
+    }
+    if (points.length >= maxPoints) return;
+    onChange([...points, point]);
+  };
 
   const path = points.map((point) => `${point[0]},${point[1]}`).join(" ");
+  const dragRect = drag
+    ? {
+        x: Math.min(drag.x0, drag.x1),
+        y: Math.min(drag.y0, drag.y1),
+        width: Math.abs(drag.x1 - drag.x0),
+        height: Math.abs(drag.y1 - drag.y0),
+      }
+    : null;
 
   return (
     <div className={cn("space-y-2", className)}>
@@ -83,12 +145,16 @@ export function PolygonPicker({
 
       <div
         ref={surface}
-        onClick={addPoint}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onDragStart={(event) => event.preventDefault()}
         className={cn(
           "relative w-full overflow-hidden rounded-xl border border-border bg-[#050a14] select-none",
           drawing ? "cursor-crosshair" : "cursor-default",
         )}
-        style={{ aspectRatio }}
+        style={{ aspectRatio, touchAction: "none" }}
       >
         {cameraId !== null ? (
           <img
@@ -105,6 +171,20 @@ export function PolygonPicker({
         )}
 
         <svg viewBox="0 0 1 1" preserveAspectRatio="none" className="pointer-events-none absolute inset-0 h-full w-full">
+          {dragRect && (dragRect.width > 0.002 || dragRect.height > 0.002) ? (
+            <rect
+              x={dragRect.x}
+              y={dragRect.y}
+              width={dragRect.width}
+              height={dragRect.height}
+              fill="rgb(34 211 238 / 0.12)"
+              stroke="#22d3ee"
+              strokeDasharray="6 4"
+              strokeWidth={2}
+              vectorEffect="non-scaling-stroke"
+            />
+          ) : null}
+
           {points.length >= 3 ? (
             <polygon
               points={path}
@@ -151,8 +231,8 @@ export function PolygonPicker({
       </div>
 
       <p className="text-[11px] leading-6 text-muted">
-        روی تصویر کلیک کنید تا نقاط ناحیه مشخص شوند. جست‌وجو اشیایی را برمی‌گرداند که مرکز آن‌ها داخل این ناحیه
-        قرار دارد.
+        روی تصویر بکشید تا یک محدودهٔ مستطیلی رسم شود؛ برای ناحیه دلخواه، نقطه‌به‌نقطه کلیک کنید (حداقل ۳ نقطه).
+        جست‌وجو اشیایی را برمی‌گرداند که مرکز آن‌ها داخل این ناحیه قرار دارد.
       </p>
     </div>
   );
