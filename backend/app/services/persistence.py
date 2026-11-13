@@ -297,6 +297,7 @@ class Persister:
             crossed_line_id=snapshot.crossed_line_id,
             line_direction=snapshot.line_direction,
             frame_count=snapshot.frame_count,
+            path=[list(point) for point in snapshot.path],
             meta=dict(snapshot.meta or {}),
         )
 
@@ -319,6 +320,8 @@ class Persister:
         record.crossed_line_id = snapshot.crossed_line_id or record.crossed_line_id
         record.line_direction = snapshot.line_direction or record.line_direction
         record.frame_count = snapshot.frame_count
+        if snapshot.path:
+            record.path = [list(point) for point in snapshot.path]
         record.status = status
         if status == "ended":
             record.exited_frame = True

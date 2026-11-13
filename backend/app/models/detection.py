@@ -45,7 +45,16 @@ EVENT_TYPES = (
     "detection",  # generic detection log
 )
 
-IMAGE_KINDS = ("enter", "exit", "best", "stationary", "periodic", "alert", "motion")
+IMAGE_KINDS = (
+    "enter",
+    "exit",
+    "best",
+    "stationary",
+    "periodic",
+    "track",
+    "alert",
+    "motion",
+)
 
 
 class TrackRecord(TimestampMixin, Base):
@@ -74,6 +83,10 @@ class TrackRecord(TimestampMixin, Base):
     # normalised (0..1) boxes at birth / death of the track
     bbox_first: Mapped[list[float]] = mapped_column(JSON, default=list)
     bbox_last: Mapped[list[float]] = mapped_column(JSON, default=list)
+
+    #: sampled trajectory of the object: ``[[offset_seconds, cx, cy], ...]`` in
+    #: normalised coordinates. Drawn as the movement path on the object page.
+    path: Mapped[list[list[float]]] = mapped_column(JSON, default=list)
 
     # denormalised centre of ``bbox_last`` so spatial search can pre-filter in
     # SQL (a full polygon test is then applied in Python on a small candidate set)

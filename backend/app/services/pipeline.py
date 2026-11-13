@@ -86,6 +86,15 @@ class PipelineConfig:
     direction_min_displacement: float = 0.01
     direction_window_seconds: float = 2.0
     line_min_displacement: float = 0.002
+    # --- tracker / replay --------------------------------------------------
+    track_high_threshold: float = 0.5
+    track_low_threshold: float = 0.12
+    track_appearance_weight: float = 0.45
+    track_camera_motion: bool = True
+    track_path_interval_seconds: float = 0.5
+    track_path_max_points: int = 600
+    track_frame_interval_seconds: float = 2.0
+    max_track_frames: int = 30
 
 
 # --------------------------------------------------------------------------
@@ -148,6 +157,8 @@ class TrackSnapshot:
     line_direction: str | None
     frame_count: int
     meta: dict
+    #: ``[[offset_seconds, cx, cy], ...]`` normalised trajectory samples.
+    path: list[list[float]] = field(default_factory=list)
 
 
 @dataclass
@@ -184,6 +195,12 @@ class _TrackRuntime:
     zone_id: int | None = None
     crossed_lines: set[int] = field(default_factory=set)
     line_direction: str | None = None
+    #: sampled trajectory of this object (offset seconds, centre x, centre y)
+    path: list[list[float]] = field(default_factory=list)
+    last_path_ts: float | None = None
+    #: replay frames already stored for this object
+    frames_saved: int = 0
+    last_frame_ts: float = 0.0
 
 
 # --------------------------------------------------------------------------
@@ -207,6 +224,10 @@ class DetectionPipeline:
             direction_min_displacement=config.direction_min_displacement,
             stationary_after_seconds=config.stationary_after_seconds,
             history_seconds=config.direction_window_seconds,
+            high_threshold=config.track_high_threshold,
+            low_threshold=config.track_low_threshold,
+            appearance_weight=config.track_appearance_weight,
+            camera_motion=config.track_camera_motion,
         )
         self.motion = motion or MotionDetector(sensitivity=config.motion_sensitivity)
         self.alert_engine = alert_engine or AlertEngine(config.alert_cooldown_seconds)
@@ -337,7 +358,9 @@ class DetectionPipeline:
         result.ran_detection = run_detection
         result.detections = detections
 
-        update = self.tracker.update(detections, now)
+        # The frame is handed to the tracker so it can extract appearance
+        # descriptors and compensate the camera's own pan/tilt.
+        update = self.tracker.update(detections, now, frame=array)
 
         for track in update.born:
             self._runtime[track.track_id] = _TrackRuntime(
@@ -383,6 +406,7 @@ class DetectionPipeline:
         zone_ids = self._zones_for(track)
         zone_id = zone_ids[0] if zone_ids else None
         runtime.zone_id = zone_id
+        self._record_path(runtime, track, now)
         min_motion = self._min_motion(track.object_type)
         eligible = track.distance_travelled >= min_motion
 
@@ -566,7 +590,26 @@ class DetectionPipeline:
                 self._snapshot_request(track, frame, ts, kind="exit", best=False)
             )
 
-        # 6) alerts ------------------------------------------------------------
+        # 6) replay frames ------------------------------------------------------
+        # One frame every ``track_frame_interval_seconds`` while the object moves,
+        # so its page can replay the whole passage instead of showing only the
+        # entry/exit anchors.
+        if (
+            self.config.record_snapshots
+            and report is not None
+            and track.motion_state == "moving"
+            and runtime.frames_saved < self.config.max_track_frames
+            and now - runtime.last_frame_ts >= self.config.track_frame_interval_seconds
+        ):
+            result.snapshots.append(
+                self._snapshot_request(
+                    track, frame, ts, kind="track", best=False, quality=report
+                )
+            )
+            runtime.last_frame_ts = now
+            runtime.frames_saved += 1
+
+        # 7) alerts ------------------------------------------------------------
         if self._alert_rules:
             # Alert schedules are wall-clock windows, so they are evaluated in
             # the *configured* display timezone (never a hard-coded one).
@@ -638,6 +681,21 @@ class DetectionPipeline:
             )
         )
 
+    def _record_path(self, runtime: _TrackRuntime, track: Track, now: float) -> None:
+        """Append a sampled centre point to the object's trajectory."""
+        interval = self.config.track_path_interval_seconds
+        if interval <= 0:
+            return
+        if len(runtime.path) >= self.config.track_path_max_points:
+            return
+        if runtime.last_path_ts is not None and now - runtime.last_path_ts < interval:
+            return
+        cx, cy = box_center(track.bbox)
+        end = runtime.last_seen or runtime.first_seen
+        offset = max(0.0, (end - runtime.first_seen).total_seconds())
+        runtime.path.append([round(offset, 2), round(cx, 4), round(cy, 4)])
+        runtime.last_path_ts = now
+
     # -- snapshot helpers ---------------------------------------------------
     def _snapshot_request(
         self,
@@ -692,6 +750,7 @@ class DetectionPipeline:
             crossed_line_id=next(iter(runtime.crossed_lines)) if runtime and runtime.crossed_lines else None,
             line_direction=runtime.line_direction if runtime else None,
             frame_count=track.hits,
+            path=list(runtime.path) if runtime else [],
             meta={
                 "hits": track.hits,
                 "confirmed": track.confirmed,

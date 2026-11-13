@@ -99,6 +99,26 @@ export function CameraTile({
           </div>
         </div>
 
+        {/* Objects detected right now are clickable: each chip opens the replay
+            page of that object (all of its frames plus its movement path). */}
+        {detection && detection.tracks.some((track) => track.db_id) ? (
+          <div className="absolute left-2 top-10 flex max-w-[75%] flex-wrap gap-1">
+            {detection.tracks.slice(0, 4).map((track) =>
+              track.db_id ? (
+                <Link
+                  key={track.track_id}
+                  to={`/objects/${track.db_id}`}
+                  title="نمایش همه فریم‌ها و مسیر حرکت این شیء"
+                  className="inline-flex items-center gap-1 rounded-full border border-brand/50 bg-[#020617]/80 px-2 py-0.5 text-[10px] text-brand backdrop-blur transition-colors hover:bg-brand/20"
+                >
+                  <ScanEye className="size-3" />
+                  {classLabel(track.object_type)}
+                </Link>
+              ) : null,
+            )}
+          </div>
+        ) : null}
+
         <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 bg-gradient-to-t from-[#020617] via-[#020617]/70 to-transparent px-2.5 pb-2.5 pt-10">
           <div className="min-w-0 [text-shadow:0_1px_4px_rgb(0_0_0/0.95)]">
             <Link

@@ -80,6 +80,8 @@ class TrackRead(ORMModel):
     distance_travelled: float
     bbox_first: list[float] = Field(default_factory=list)
     bbox_last: list[float] = Field(default_factory=list)
+    #: ``[[offset_seconds, cx, cy], ...]`` normalised trajectory samples.
+    path: list[list[float]] = Field(default_factory=list)
     status: str
     entered_frame: bool
     exited_frame: bool
@@ -90,6 +92,12 @@ class TrackRead(ORMModel):
     frame_count: int
     meta: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+    @field_validator("path", "bbox_first", "bbox_last", mode="before")
+    @classmethod
+    def _null_list(cls, value: object) -> object:
+        # Rows written before the trajectory column existed hold ``NULL``.
+        return [] if value is None else value
 
     @computed_field  # type: ignore[prop-decorator]
     @property

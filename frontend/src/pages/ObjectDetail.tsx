@@ -17,6 +17,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardBody, CardHeader, PageHeader } from "../components/ui/card";
+import { TrackPathMap, TrackReplay } from "../components/TrackReplay";
 import { ConfirmDialog, Dialog } from "../components/ui/dialog";
 import { EmptyState, KeyValue, LoadingBlock } from "../components/ui/misc";
 import { toast } from "../components/ui/toast";
@@ -41,6 +42,7 @@ export function ObjectDetailPage() {
   const remove = useDeleteObject();
   const [lightbox, setLightbox] = useState<{ url: string; label: string } | null>(null);
   const [confirm, setConfirm] = useState(false);
+  const [frameIndex, setFrameIndex] = useState(0);
 
   const cameraName = useMemo(
     () => cameras.data?.find((camera) => camera.id === track.data?.camera_id)?.name ?? "—",
@@ -136,8 +138,8 @@ export function ObjectDetailPage() {
       <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <Card>
           <CardHeader
-            title="تصویر کامل صحنه"
-            subtitle="فریم اصلی دوربین در لحظه ثبت بهترین تصویر"
+            title="بازپخش حرکت شیء"
+            subtitle="همه فریم‌های ثبت‌شده از این شیء، به ترتیب زمان با کادر خود شیء"
             icon={<Images />}
             actions={
               best?.full_url ? (
@@ -147,23 +149,18 @@ export function ObjectDetailPage() {
                   onClick={() => setLightbox({ url: best.full_url as string, label: "تصویر کامل" })}
                 >
                   <ZoomIn />
-                  بزرگ‌نمایی
+                  بهترین تصویر
                 </Button>
               ) : null
             }
           />
           <CardBody>
-            {best?.full_url ? (
-              <button
-                type="button"
-                onClick={() => setLightbox({ url: best.full_url as string, label: "تصویر کامل" })}
-                className="block w-full overflow-hidden rounded-xl border border-border bg-[#050a14]"
-              >
-                <img src={best.full_url} alt="تصویر کامل شیء" className="h-auto w-full object-contain" />
-              </button>
-            ) : (
-              <EmptyState icon={<Images />} title="تصویر کامل ذخیره نشده است" />
-            )}
+            <TrackReplay
+              images={images}
+              objectType={item.object_type}
+              index={frameIndex}
+              onIndexChange={setFrameIndex}
+            />
           </CardBody>
         </Card>
 
@@ -229,6 +226,24 @@ export function ObjectDetailPage() {
           </Card>
         </div>
       </div>
+
+      <Card>
+        <CardHeader
+          title="مسیر حرکت روی تصویر دوربین"
+          subtitle="مسیر پیموده‌شده به ترتیب زمان؛ با کلیک روی هر نقطه، نزدیک‌ترین فریم در بازپخش بالا نمایش داده می‌شود"
+          icon={<Route />}
+          actions={<Badge tone="muted">{toFaDigits(item.path.length)} نمونه</Badge>}
+        />
+        <CardBody>
+          <TrackPathMap
+            path={item.path}
+            backgroundUrl={best?.full_url ?? images[0]?.full_url ?? null}
+            images={images}
+            objectType={item.object_type}
+            onSelectFrame={setFrameIndex}
+          />
+        </CardBody>
+      </Card>
 
       <Card>
         <CardHeader

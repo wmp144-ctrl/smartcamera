@@ -421,3 +421,34 @@ def test_alert_zone_nested_in_a_region_still_fires() -> None:
     outside = make_pipeline(scripted([[person(0.75)]]), zones=[region, inner])
     result_outside = outside.process(draw(frame(), [0.75, 0.3, 0.95, 0.7]), ts=_t(0), now=0.0)
     assert result_outside.alerts == []
+
+
+def test_moving_track_records_path_and_replay_frames() -> None:
+    """The object page needs a trajectory and a series of frames, not just the
+    entry/exit anchors."""
+    pipeline = make_pipeline(
+        scripted([[person(0.05 + index * 0.02)] for index in range(14)]),
+        track_frame_interval_seconds=0.2,
+        track_path_interval_seconds=0.1,
+    )
+
+    kinds: list[str] = []
+    path: list[list[float]] = []
+    for index in range(14):
+        x = 0.05 + index * 0.02
+        result = pipeline.process(
+            draw(frame(), [x, 0.3, x + 0.2, 0.7]),
+            ts=_t(index * 0.1),
+            now=index * 0.1,
+        )
+        kinds.extend(snapshot.kind for snapshot in result.snapshots)
+        if result.active_tracks:
+            path = result.active_tracks[0].path
+
+    assert "track" in kinds, "a moving object must store replay frames"
+    assert len(path) >= 3, "the trajectory must be sampled over time"
+    # Samples are [offset_seconds, cx, cy] and the offsets are monotonic.
+    offsets = [point[0] for point in path]
+    assert offsets == sorted(offsets)
+    centres = [point[1] for point in path]
+    assert centres[-1] > centres[0], "the object moved to the right"

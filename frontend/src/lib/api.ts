@@ -154,6 +154,8 @@ export interface Track {
   distance_travelled: number;
   bbox_first: number[];
   bbox_last: number[];
+  /** `[offset_seconds, cx, cy]` trajectory samples in normalised coordinates. */
+  path: number[][];
   status: string;
   entered_frame: boolean;
   exited_frame: boolean;

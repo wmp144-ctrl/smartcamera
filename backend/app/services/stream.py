@@ -498,6 +498,14 @@ class CameraRuntimeConfig:
             record_objects=self.record_objects,
             record_snapshots=self.record_snapshots,
             alert_cooldown_seconds=settings.alert_cooldown_seconds,
+            track_high_threshold=settings.track_high_threshold,
+            track_low_threshold=settings.track_low_threshold,
+            track_appearance_weight=settings.track_appearance_weight,
+            track_camera_motion=settings.track_camera_motion,
+            track_path_interval_seconds=settings.track_path_interval_seconds,
+            track_path_max_points=settings.track_path_max_points,
+            track_frame_interval_seconds=settings.track_frame_interval_seconds,
+            max_track_frames=settings.max_track_frames,
         )
 
 

@@ -126,6 +126,7 @@ export const EVENT_TYPE_LABELS_FA: Record<string, string> = {
   motion: "حرکت",
   alert: "هشدار",
   detection: "تشخیص",
+  track: "مسیر حرکت",
 };
 
 export function eventTypeLabel(type: string | null | undefined): string {

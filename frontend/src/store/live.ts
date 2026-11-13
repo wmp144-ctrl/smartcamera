@@ -10,6 +10,8 @@ import type { ConnectionState } from "../lib/ws";
 
 export interface LiveTrack {
   track_id: number;
+  /** Database id of the stored object (null until the first write lands). */
+  db_id?: number | null;
   object_type: string;
   confidence: number;
   bbox: number[];

@@ -70,6 +70,25 @@ class Settings(BaseSettings):
     min_track_hits: int = 2
     # How long a track survives without a match before an "exit" event fires.
     track_max_age_seconds: float = 2.0
+    # --- tracking (ByteTrack / BoT-SORT style association) -------------------
+    #: Confidence at/above which the first association stage runs.
+    track_high_threshold: float = 0.5
+    #: Minimum confidence for the second stage (keeps partially occluded objects
+    #: attached to their track; such boxes never start a new track).
+    track_low_threshold: float = 0.12
+    #: Weight of the appearance (colour histogram) cue against geometry. 0 = off.
+    track_appearance_weight: float = 0.45
+    #: Compensate the camera's own pan/tilt so it is not read as object motion.
+    track_camera_motion: bool = True
+    #: Sampled trajectory point every N seconds (used by the object replay view).
+    track_path_interval_seconds: float = 0.5
+    #: Hard cap on stored trajectory points per object.
+    track_path_max_points: int = 600
+    #: Store a frame of the object every N seconds so its whole track can be
+    #: replayed (in addition to the entry/exit/best anchors). 0 disables it.
+    track_frame_interval_seconds: float = 2.0
+    #: Upper bound of stored replay frames per object.
+    max_track_frames: int = 30
     # Run detection only when motion was seen in a process region.
     require_motion_for_detection: bool = True
     # GPU device for RF-DETR: "cuda", "cuda:0" or "cpu".

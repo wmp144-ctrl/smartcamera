@@ -665,6 +665,12 @@ class CameraManager:
             now - self._last_detect_publish.get(config.id, 0.0) >= DETECTION_PUBLISH_INTERVAL
         ):
             self._last_detect_publish[config.id] = now
+            # The live payload also carries the database id of each track, so a
+            # click on an object in the live image can open its replay page.
+            db_ids = {
+                record.track_id: record.id
+                for record in (*outcome.new_tracks, *outcome.updated_tracks)
+            }
             bus.publish(
                 TOPIC_DETECTION,
                 event_payload(
@@ -676,6 +682,7 @@ class CameraManager:
                     tracks=[
                         {
                             "track_id": track.runtime_track_id,
+                            "db_id": db_ids.get(track.runtime_track_id),
                             "object_type": track.object_type,
                             "confidence": track.confidence,
                             "bbox": track.bbox_last,

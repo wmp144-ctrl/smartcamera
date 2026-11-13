@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.services.tracker import Detection, ObjectTracker
 
 
@@ -207,3 +209,70 @@ def test_touches_border() -> None:
 
     in_centre = _make_tracker(min_hits=1).update([_det(0.4, 0.4, 0.6, 0.6)], now=0.0)
     assert not in_centre.active[0].touches_border()
+
+
+def test_low_confidence_detection_keeps_the_identity() -> None:
+    """ByteTrack's second stage: a faint box must not start a new track."""
+    tracker = _make_tracker(min_hits=1)
+    first = tracker.update([_det(0.1, 0.3, 0.2, 0.5)], now=0.0)
+    track_id = first.active[0].track_id
+
+    second = tracker.update([_det(0.1, 0.3, 0.2, 0.5, conf=0.2)], now=0.1)
+
+    assert second.born == []
+    assert [track.track_id for track in second.active] == [track_id]
+
+
+def test_appearance_keeps_identities_when_boxes_cross() -> None:
+    """Two objects that cross without overlapping in y must not swap ids.
+
+    Geometry alone is ambiguous there (both predictions are equally close to
+    both boxes); the colour descriptor is what settles the assignment.
+    """
+    import numpy as np
+
+    def blank() -> np.ndarray:
+        return np.full((180, 320, 3), 30, dtype=np.uint8)
+
+    def paint(image: np.ndarray, bbox: list[float], colour: tuple[int, int, int]) -> np.ndarray:
+        x1, y1 = int(bbox[0] * 320), int(bbox[1] * 180)
+        x2, y2 = int(bbox[2] * 320), int(bbox[3] * 180)
+        image[y1:y2, x1:x2] = colour
+        return image
+
+    tracker = _make_tracker(min_hits=1, iou_threshold=0.3, appearance_weight=0.6, camera_motion=False)
+    red = (0, 0, 255)
+    blue = (255, 0, 0)
+    red_box = [0.05, 0.1, 0.25, 0.4]
+    blue_box = [0.75, 0.5, 0.95, 0.8]
+
+    result = tracker.update(
+        [
+            Detection(bbox=list(red_box), confidence=0.9, object_type="person"),
+            Detection(bbox=list(blue_box), confidence=0.9, object_type="person"),
+        ],
+        now=0.0,
+        frame=paint(paint(blank(), red_box, red), blue_box, blue),
+    )
+    ids = {track.track_id: track.bbox for track in result.active}
+    red_id = next(track_id for track_id, bbox in ids.items() if bbox == red_box)
+    blue_id = next(track_id for track_id, bbox in ids.items() if bbox == blue_box)
+
+    # Walk them towards each other until their boxes are at the same x.
+    for step in range(1, 7):
+        shift = step * 0.07
+        red_box = [0.05 + shift, 0.1, 0.25 + shift, 0.4]
+        blue_box = [0.75 - shift, 0.5, 0.95 - shift, 0.8]
+        frame = paint(paint(blank(), red_box, red), blue_box, blue)
+        result = tracker.update(
+            [
+                Detection(bbox=list(red_box), confidence=0.9, object_type="person"),
+                Detection(bbox=list(blue_box), confidence=0.9, object_type="person"),
+            ],
+            now=step * 0.1,
+            frame=frame,
+        )
+
+    final = {track.track_id: track.bbox for track in result.active}
+    assert final[red_id] == pytest.approx(red_box, abs=1e-6)
+    assert final[blue_id] == pytest.approx(blue_box, abs=1e-6)
