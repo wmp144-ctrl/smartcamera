@@ -203,31 +203,23 @@ export function PolygonPicker({
             />
           ) : null}
 
-          {points.map((point, index) => (
-            <g key={`${point[0]}-${point[1]}-${index}`}>
-              <circle
-                cx={point[0]}
-                cy={point[1]}
-                r={5}
-                fill="#22d3ee"
-                stroke="#04202a"
-                strokeWidth={2}
-                vectorEffect="non-scaling-stroke"
-              />
-              <text
-                x={point[0]}
-                y={point[1]}
-                dx={6}
-                dy={-6}
-                fill="#e8eefb"
-                fontSize={11}
-                style={{ fontSize: 11 }}
-              >
-                {index + 1}
-              </text>
-            </g>
-          ))}
         </svg>
+
+        {/* Vertices live outside the SVG on purpose: the SVG viewBox is 0..1, so
+            a radius or font-size there is measured in full-image widths and a
+            "5px" dot would cover the whole picture. */}
+        {points.map((point, index) => (
+          <span
+            key={`${point[0]}-${point[1]}-${index}`}
+            className="pointer-events-none absolute"
+            style={{ left: `${point[0] * 100}%`, top: `${point[1] * 100}%` }}
+          >
+            <span className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#04202a] bg-[#22d3ee] size-2.5" />
+            <span className="num absolute -translate-y-[130%] translate-x-2 rounded bg-[#020617]/75 px-1 text-[10px] leading-3 text-[#e8eefb]">
+              {index + 1}
+            </span>
+          </span>
+        ))}
       </div>
 
       <p className="text-[11px] leading-6 text-muted">

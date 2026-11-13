@@ -349,19 +349,22 @@ export function ZoneEditor({ camera, aspectRatio, className }: ZoneEditorProps) 
               )
             ) : null}
 
-            {draft.map((point, index) => (
-              <circle
-                key={`${point[0]}-${point[1]}-${index}`}
-                cx={point[0]}
-                cy={point[1]}
-                r={4}
-                fill="#22d3ee"
-                stroke="#04202a"
-                strokeWidth={2}
-                vectorEffect="non-scaling-stroke"
-              />
-            ))}
           </svg>
+
+          {/* Vertices are HTML, not SVG shapes: inside a 0..1 viewBox a radius is
+              measured in image widths, which painted the picture solid cyan. */}
+          {draft.map((point, index) => (
+            <span
+              key={`${point[0]}-${point[1]}-${index}`}
+              className="pointer-events-none absolute"
+              style={{ left: `${point[0] * 100}%`, top: `${point[1] * 100}%` }}
+            >
+              <span className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#04202a] bg-[#22d3ee] size-2" />
+              <span className="num absolute -translate-y-[140%] translate-x-1.5 text-[10px] leading-3 text-[#e8eefb] drop-shadow">
+                {index + 1}
+              </span>
+            </span>
+          ))}
 
           <div className="pointer-events-none absolute bottom-2 right-2 rounded-lg bg-[#020617]/75 px-2 py-1 text-[11px] text-muted backdrop-blur">
             {draft.length === 0
