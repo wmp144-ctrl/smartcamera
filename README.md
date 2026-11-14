@@ -223,9 +223,26 @@ offline/
 powershell -ExecutionPolicy Bypass -File scripts\make_release.ps1
 #   -Version 1.0.20261120    نسخهٔ دلخواه (پیش‌فرض: 1.0.<تاریخ امروز>)
 #   -CodeOnly                فقط کد + رابط کاربری ساخته‌شده (چند ده مگابایت، پیش‌نیازها همراهش نیست)
+#   -Flat                    محتویات در ریشهٔ zip (برای بروزرسانی یک نصب موجود)
 #   -BuildFrontend           اجرای npm ci / npm run build حتی اگر dist باشد
 #   -NoZip                   فقط پوشهٔ نسخه ساخته شود
 ```
+
+**بروزرسانی یک نصب آفلاین موجود** (کمهزینه‌ترین راه؛ پیش‌نیازها دست‌نخورده می‌مانند):
+
+```powershell
+# روی سیستم آنلاین
+powershell -ExecutionPolicy Bypass -File scripts\make_release.ps1 -CodeOnly -Flat
+# روی سیستم مقصد: فایل CameraSmart-<version>-update.zip را داخل همان پوشهٔ برنامه
+# «Extract Here» کنید (نه در پوشهٔ جدید)، سپس:
+powershell -ExecutionPolicy Bypass -File scripts\install_offline.ps1
+powershell -ExecutionPolicy Bypass -File scripts\run.ps1
+```
+
+`-Flat` پوشهٔ تو در تو نمی‌سازد و بستهٔ `-CodeOnly` حتی بدون wheel هم فهرست پین‌ها
+(`offline\requirements-offline.txt`، `constraints-offline.txt`، `manifest.json`) را با خود می‌برد،
+پس نصب‌کننده پین‌های قدیمی را از دست نمی‌دهد. هیچ چیزی از اینترنت یا از بستهٔ ۳٫۶ گیگابایتی
+دوباره دانلود نمی‌شود.
 
 خروجی در `release/CameraSmart-<version>/` (و یک zip) است: کد برنامه بدون `.venv`/`data`/`.env`،
 رابط کاربری ساخته‌شده، اسکریپت‌ها، به‌همراه `version.json` (نسخهٔ برنامه، کامیت، نسخهٔ پایگاه‌داده).

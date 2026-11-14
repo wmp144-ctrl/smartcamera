@@ -30,6 +30,11 @@
 .PARAMETER BuildFrontend
     اجرای npm ci / npm run build حتی اگر frontend/dist موجود باشد
 
+.PARAMETER Flat
+    محتویات بسته در ریشهٔ zip قرار می‌گیرد (بدون پوشهٔ CameraSmart-<version>).
+    برای بروزرسانی یک نصب موجود: فایل zip را در همان پوشهٔ برنامه «Extract Here»
+    کنید تا فایل‌ها جایگزین شوند و پوشهٔ تو در تو ساخته نشود.
+
 .PARAMETER NoZip
     فقط پوشهٔ نسخه ساخته شود، zip نشود
 
@@ -38,6 +43,10 @@
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\make_release.ps1 -CodeOnly -Version 1.0.20261120
+
+.EXAMPLE
+    # بستهٔ بروزرسانی برای یک نصب آفلاین موجود (فایل مسطح، بدون پیش‌نیازها)
+    powershell -ExecutionPolicy Bypass -File scripts\make_release.ps1 -CodeOnly -Flat
 #>
 [CmdletBinding()]
 param(
@@ -46,6 +55,7 @@ param(
     [string]$BundleDir = "",
     [switch]$CodeOnly,
     [switch]$BuildFrontend,
+    [switch]$Flat,
     [switch]$NoZip
 )
 
@@ -165,6 +175,25 @@ if (-not $CodeOnly) {
     }
     Copy-Tree $bundle (Join-Path $stage "offline")
     Write-Ok "پیش‌نیازها (wheel/مدل/ffmpeg/رابط کاربری) اضافه شدند"
+} else {
+    # حتی یک بروزرسانی «فقط کد» باید فهرست پین‌ها را با خود ببرد: بدون آن،
+    # نصب‌کننده روی سیستم مقصد پین‌های قدیمی (مثل pynvml منسوخ) را می‌خواند.
+    # فقط فایل‌های متنی/متادیتا کپی می‌شوند؛ wheel و مدل سنگین در نصب موجودند.
+    $meta = @("manifest.json", "requirements-offline.txt", "constraints-offline.txt", "README-INSTALL.txt")
+    $copied = @()
+    foreach ($name in $meta) {
+        $source = Join-Path $bundle $name
+        if (Test-Path $source) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $stage "offline") | Out-Null
+            Copy-Item $source (Join-Path $stage "offline\$name") -Force
+            $copied += $name
+        }
+    }
+    if ($copied.Count -gt 0) {
+        Write-Ok "فهرست پیش‌نیازها به‌روز شد: $($copied -join ', ')"
+    } else {
+        Write-Warn "offline/ پیدا نشد؛ فهرست پین‌ها در بسته نیست (wheel ها از نصب موجود استفاده می‌شوند)"
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -187,12 +216,13 @@ $folderMb = [math]::Round((Get-ChildItem $stage -Recurse -File | Measure-Object 
 Write-Ok "پوشهٔ نسخه: $stage ($folderMb مگابایت)"
 $zipPath = ""
 if (-not $NoZip) {
-    $zipPath = Join-Path $out "CameraSmart-$Version.zip"
+    $zipName = if ($Flat) { "CameraSmart-$Version-update.zip" } else { "CameraSmart-$Version.zip" }
+    $zipPath = Join-Path $out $zipName
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
     Write-Host "  ... فشرده‌سازی (چند دقیقه برای بستهٔ کامل)"
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        $stage, $zipPath, [System.IO.Compression.CompressionLevel]::Fastest, $true
+        $stage, $zipPath, [System.IO.Compression.CompressionLevel]::Fastest, (-not $Flat)
     )
     $zipMb = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
     Write-Ok "فایل zip آماده است: $zipPath ($zipMb مگابایت)"
@@ -200,7 +230,11 @@ if (-not $NoZip) {
 
 Write-Step "پایان"
 Write-Host "روی سیستم مقصد:" -ForegroundColor White
-if ($zipPath) { Write-Host "  1) فایل $([System.IO.Path]::GetFileName($zipPath)) را در مسیر برنامه باز کنید" }
+if ($zipPath -and $Flat) {
+    Write-Host "  1) فایل $([System.IO.Path]::GetFileName($zipPath)) را داخل همان پوشهٔ برنامه «Extract Here» کنید (محتویات جایگزین می‌شوند)"
+} elseif ($zipPath) {
+    Write-Host "  1) فایل $([System.IO.Path]::GetFileName($zipPath)) را در مسیر برنامه باز کنید"
+}
 Write-Host "  2) powershell -ExecutionPolicy Bypass -File scripts\install_offline.ps1$(if ($CodeOnly) { '' } else { '' })"
 Write-Host "  3) powershell -ExecutionPolicy Bypass -File scripts\run.ps1"
 Write-Host "داده (پایگاه‌داده/تصاویر) بیرون از پوشهٔ برنامه می‌ماند: -DataDir در نصب." -ForegroundColor DarkGray
