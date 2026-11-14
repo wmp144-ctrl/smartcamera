@@ -35,7 +35,8 @@ COMPONENTS: dict[str, str] = {
     "opencv-python": "OpenCV",
     "rfdetr": "RF-DETR",
     "supervision": "Supervision",
-    "pynvml": "NVML (pynvml)",
+    "nvidia-ml-py": "NVML (nvidia-ml-py)",
+    "pynvml": "NVML (pynvml — shim منسوخ)",
     "scipy": "SciPy",
     "transformers": "Transformers",
 }

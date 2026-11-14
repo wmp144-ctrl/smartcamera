@@ -19,5 +19,5 @@ numpy>=1.26,<2.0
 scipy>=1.11
 rfdetr>=1.2.0
 supervision>=0.22
-pynvml>=11.5
+nvidia-ml-py>=13.580.82
 transformers>=4.44

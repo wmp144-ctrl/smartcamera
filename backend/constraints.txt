@@ -50,7 +50,7 @@ opencv-python==4.11.0.86
 scipy==1.17.1
 rfdetr==1.11.2
 supervision==0.30.7
-pynvml==13.0.1
+nvidia-ml-py==13.615.71
 transformers==5.18.0
 
 # --- dev / test ---

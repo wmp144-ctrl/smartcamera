@@ -197,12 +197,26 @@ with open(sys.argv[1], encoding="utf-8") as handle:
         name, want = line.split("==", 1)
         pins[name.strip()] = want.strip()
 
+# پکیج منسوخ pynvml فقط یک redirector به nvidia-ml-py است (هر دو ماژول pynvml
+# را نصب می‌کنند)؛ در بسته‌های قدیمی‌تر پین شده، پس حاضربودن جایگزین کافی است.
+ALIASES = {"pynvml": "nvidia-ml-py"}
+
 missing = []
 for name, want in pins.items():
-    try:
-        have = md.version(name)
-    except md.PackageNotFoundError:
+    have = None
+    replaced = False
+    candidates = [name] + ([ALIASES[name]] if name in ALIASES else [])
+    for candidate in candidates:
+        try:
+            have = md.version(candidate)
+        except md.PackageNotFoundError:
+            continue
+        replaced = candidate != name
+        break
+    if have is None:
         missing.append("%s %s" % (name, want))
+        continue
+    if replaced:
         continue
     if "+" in want:
         ok = have == want
@@ -241,6 +255,24 @@ if (-not $needsInstall) {
         throw "نصب بسته‌ها از بستهٔ محلی ناموفق بود (خروجی بالا را ببینید). چیزی از اینترنت دانلود نمی‌شود؛ اگر wheel ای کم است بسته را دوباره بسازید."
     }
     Write-Ok "بسته‌های پایتون نصب شدند"
+}
+
+# The old ``pynvml`` distribution is a redirector shim to ``nvidia-ml-py``: it
+# ships no real code and prints a FutureWarning on every start. Bundles before
+# 1.0.20261114 installed it, so drop it from an existing environment. This runs
+# even when nothing needed installing, which is exactly the update case.
+$sitePackages = (@(& $py -c "import sysconfig; print(sysconfig.get_paths()['purelib'])") -join "").Trim()
+if ($sitePackages -and (Test-Path $sitePackages)) {
+    $shim = @(Get-ChildItem -Path $sitePackages -Filter "pynvml-*.dist-info" -Directory -ErrorAction SilentlyContinue)
+    $real = @(Get-ChildItem -Path $sitePackages -Filter "nvidia_ml_py-*.dist-info" -Directory -ErrorAction SilentlyContinue)
+    if ($shim.Count -gt 0 -and $real.Count -gt 0) {
+        & $py -m pip uninstall --yes --disable-pip-version-check pynvml | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "بستهٔ منسوخ pynvml حذف شد (NVML از nvidia-ml-py خوانده می‌شود)"
+        } else {
+            Write-Warn "حذف بستهٔ منسوخ pynvml انجام نشد؛ فقط یک هشدار بی‌خطر در لاگ می‌ماند"
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------

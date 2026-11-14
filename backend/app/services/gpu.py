@@ -1,8 +1,8 @@
 """GPU manager: VRAM, utilisation, temperature, plus detector load.
 
-Prefers ``pynvml`` (cheap, in-process) and falls back to parsing
-``nvidia-smi --query-gpu`` so the dashboard still shows real numbers on a
-machine where the NVML Python bindings are missing.
+Prefers the ``pynvml`` module from ``nvidia-ml-py`` (cheap, in-process) and
+falls back to parsing ``nvidia-smi --query-gpu`` so the dashboard still shows
+real numbers on a machine where the NVML Python bindings are missing.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import threading
 import time
+import warnings
 from dataclasses import asdict, dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,15 @@ class GPUManager:
             return self._nvml
         self._nvml_checked = True
         try:  # pragma: no cover - depends on the host
-            import pynvml  # noqa: PLC0415
+            # The module comes from ``nvidia-ml-py``. The old ``pynvml``
+            # distribution is only a redirector shim that warns about its own
+            # deprecation on import; the warning is about that leftover package,
+            # not about this call, and an existing installation keeps it until
+            # it is uninstalled. Silence exactly that notice so the console
+            # stays readable (``install_offline.ps1`` also removes the shim).
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                import pynvml  # noqa: PLC0415
 
             pynvml.nvmlInit()
             self._nvml = pynvml
