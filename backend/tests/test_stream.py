@@ -421,6 +421,25 @@ def test_network_timeouts_are_microseconds() -> None:
     ]
 
 
+def test_decoded_frames_are_writable() -> None:
+    """Regression: a read-only frame made RF-DETR print a UserWarning.
+
+    ``np.frombuffer`` over ``bytes`` is read-only, and ``torch.from_numpy`` on
+    the transposed frame warned that writing to it would be undefined - one long
+    traceback-looking block in the console for every camera. The reader must hand
+    out a writable buffer.
+    """
+    import io
+
+    from app.services.stream import _read_exact
+
+    raw = _read_exact(io.BytesIO(b"\x01\x02\x03\x04"), 4)
+    assert isinstance(raw, bytearray)
+    frame = np.frombuffer(raw, dtype=np.uint8).reshape((2, 2, 1))
+    assert frame.flags.writeable
+    assert _read_exact(io.BytesIO(b"\x01"), 4) is None
+
+
 def test_local_files_get_no_protocol_flags() -> None:
     from app.services.stream import input_options
 

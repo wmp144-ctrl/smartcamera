@@ -280,16 +280,22 @@ def probe_stream(url: str, *, timeout: float = 15.0) -> StreamProbe | None:
     )
 
 
-def _read_exact(stream, size: int) -> bytes | None:  # noqa: ANN001
-    chunks: list[bytes] = []
-    remaining = size
-    while remaining > 0:
-        chunk = stream.read(remaining)
+def _read_exact(stream, size: int) -> bytearray | None:  # noqa: ANN001
+    """Read exactly ``size`` bytes into a **writable** buffer.
+
+    ``np.frombuffer`` on a ``bytes`` object returns a read-only array, and
+    RF-DETR runs ``torch.from_numpy(image.transpose((2, 0, 1)))`` on the frame it
+    is given, so every detection printed the long "NumPy array is not writable"
+    UserWarning into the console. A ``bytearray`` keeps the same zero-copy view
+    but lets PyTorch own a writable tensor.
+    """
+    buffer = bytearray()
+    while len(buffer) < size:
+        chunk = stream.read(size - len(buffer))
         if not chunk:
             return None
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
+        buffer.extend(chunk)
+    return buffer
 
 
 class FFmpegFrameReader:
