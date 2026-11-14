@@ -390,6 +390,37 @@ def test_non_rtsp_inputs_never_receive_rtsp_options(url: str) -> None:
     assert command[command.index("-i") + 1] == url
 
 
+def test_rtsp_inputs_never_get_the_avio_timeout() -> None:
+    """Regression: ``-rw_timeout`` is an AVIO option, not an RTSP one.
+
+    This ffmpeg build aborts with "Option rw_timeout not found. Error opening
+    input file" before reading a packet, so an RTSP camera reconnected forever
+    and never produced a frame. The demuxer's own ``-timeout`` must be used.
+    """
+    from app.services.stream import input_options
+
+    options = input_options("rtsp://127.0.0.1:8554/live")
+    assert "-rw_timeout" not in options
+    assert options[options.index("-timeout") + 1] == "8000000"
+    # The transport flag must stay for RTSP.
+    assert options[options.index("-rtsp_transport") + 1] == "tcp"
+
+
+def test_network_timeouts_are_microseconds() -> None:
+    from app.services.stream import input_options
+
+    options = input_options("http://cam.local/video.mjpg", timeout_us=5_000_000)
+    assert options[options.index("-rw_timeout") + 1] == "5000000"
+    assert input_options("rtsp://cam/1", timeout_us=0) == [
+        "-rtsp_transport",
+        "tcp",
+        "-fflags",
+        "nobuffer+genpts",
+        "-flags",
+        "low_delay",
+    ]
+
+
 def test_local_files_get_no_protocol_flags() -> None:
     from app.services.stream import input_options
 
@@ -437,8 +468,11 @@ def test_probe_command_avoids_ffmpeg_only_options() -> None:
 
     assert "-nostdin" not in probe_command("rtsp://cam.local/stream", timeout=5.0)
     assert "-rtsp_transport" in probe_command("rtsp://cam.local/stream", timeout=5.0)
-    # A hard protocol timeout must be present for network inputs.
-    assert "-rw_timeout" in probe_command("rtsp://cam.local/stream", timeout=5.0)
+    # A hard protocol timeout must be present for network inputs, in the unit
+    # ffmpeg expects (microseconds, not milliseconds).
+    command = probe_command("rtsp://cam.local/stream", timeout=5.0)
+    assert "-rw_timeout" not in command
+    assert command[command.index("-timeout") + 1] == "5000000"
 
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         pytest.skip("ffmpeg/ffprobe are not installed")

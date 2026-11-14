@@ -196,7 +196,11 @@ function HealthPanel({ cameraId }: { cameraId: number }) {
         />
         <Metric
           label="بیت‌ریت"
-          value={faNumber((status.data?.bitrate_kbps ?? 0) / 1000, 2)}
+          value={
+            status.data && status.data.bitrate_kbps > 0
+              ? faNumber(status.data.bitrate_kbps / 1000, 2)
+              : "—"
+          }
           unit="Mbps"
           icon={<Activity />}
         />
@@ -537,7 +541,11 @@ export function CameraDetailPage() {
         />
         <Metric
           label="بیت‌ریت"
-          value={faNumber((status.data?.bitrate_kbps ?? 0) / 1000, 2)}
+          value={
+            status.data && status.data.bitrate_kbps > 0
+              ? faNumber(status.data.bitrate_kbps / 1000, 2)
+              : "—"
+          }
           unit="Mbps"
           icon={<Activity />}
         />

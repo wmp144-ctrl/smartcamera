@@ -144,7 +144,13 @@ export function CameraTile({
             <ScanEye className="size-3" />
             <span className="num">{faNumber(status?.detection_fps ?? 0, 1)}</span> تشخیص
           </span>
-          <span className="num">{faNumber((status?.bitrate_kbps ?? 0) / 1000, 1)} Mbps</span>
+          {/* Live RTSP sessions rarely advertise an encoded bitrate; 0 means
+              "unknown" and must not be rendered as "0.0 Mbps". */}
+          <span className="num">
+            {status && status.bitrate_kbps > 0
+              ? `${faNumber(status.bitrate_kbps / 1000, 1)} Mbps`
+              : "—"}
+          </span>
           {status?.reconnect_count ? (
             <span className="num text-warn">اتصال مجدد {toFaDigits(status.reconnect_count)}</span>
           ) : null}

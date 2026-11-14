@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -49,7 +50,7 @@ LIVE_IDLE_GRACE_SECONDS = 3.0
 _SNAPSHOT_WRITER = ThreadPoolExecutor(max_workers=2, thread_name_prefix="snapshot-writer")
 
 #: How long ``start()`` waits for a decode thread a previous ``stop()`` could not
-#: finish joining (a reader blocked in a socket read returns after ``-rw_timeout``).
+#: finish joining (a reader blocked in a socket read returns after its timeout).
 ORPHAN_JOIN_TIMEOUT_SECONDS = 10.0
 
 
@@ -100,7 +101,7 @@ def normalise_input(url: str) -> str:
 
 
 def input_options(
-    url: str, transport: str = "tcp", *, rw_timeout_ms: int | None = 8_000_000
+    url: str, transport: str = "tcp", *, timeout_us: int | None = 8_000_000
 ) -> list[str]:
     """Protocol specific flags to place **before** ``-i``.
 
@@ -108,9 +109,14 @@ def input_options(
     or file input makes ffmpeg abort with "Option rtsp_transport not found", so
     the flags are derived from the URL scheme instead of being hard-coded.
     Local files get no flags at all (they must not be throttled).
+
+    RTSP gets ``-timeout`` (the socket I/O timeout of the RTSP demuxer), **not**
+    ``-rw_timeout``: the latter is an AVIO option and this build aborts with
+    "Option rw_timeout not found. Error opening input file" before a single
+    packet is read, which turned every RTSP camera into an endless reconnect
+    loop. Values are microseconds.
     """
     scheme = stream_scheme(url)
-    timeout = ["-rw_timeout", str(rw_timeout_ms)] if rw_timeout_ms else []
     if scheme in {"rtsp", "rtsps"}:
         chosen = transport if transport in {"tcp", "udp"} else "tcp"
         return [
@@ -120,8 +126,9 @@ def input_options(
             "nobuffer+genpts",
             "-flags",
             "low_delay",
-            *timeout,
+            *(["-timeout", str(int(timeout_us))] if timeout_us else []),
         ]
+    timeout = ["-rw_timeout", str(int(timeout_us))] if timeout_us else []
     if scheme in {"http", "https", "rtmp", "rtmps", "srt", "udp"}:
         return ["-fflags", "nobuffer+genpts", *timeout]
     return []
@@ -209,8 +216,10 @@ def probe_command(url: str, *, timeout: float = 15.0) -> list[str]:
     made every probe fail. ``stdin=DEVNULL`` already prevents the stdin hang it
     was meant to fix.
 
-    ``-rw_timeout`` is set from ``timeout`` so ffprobe gives up on a stalled
-    socket by itself; ``_run_bounded`` is the second line of defence.
+    ``-timeout`` / ``-rw_timeout`` is set from ``timeout`` so ffprobe gives up
+    on a stalled socket by itself; ``_run_bounded`` is the second line of
+    defence. The value is in **microseconds** — passing milliseconds made every
+    probe give up after a few milliseconds.
     """
     target = normalise_input(url)
     return [
@@ -218,7 +227,7 @@ def probe_command(url: str, *, timeout: float = 15.0) -> list[str]:
         "-hide_banner",
         "-loglevel",
         "error",
-        *input_options(target, "tcp", rw_timeout_ms=max(1, int(timeout * 1000))),
+        *input_options(target, "tcp", timeout_us=max(1, int(timeout * 1_000_000))),
         "-select_streams",
         "v:0",
         "-show_entries",
@@ -306,6 +315,14 @@ class FFmpegFrameReader:
         self.scale = scale
         self.frame_bytes = width * height * 3
         self._process: subprocess.Popen | None = None
+        # ``stderr`` used to be DEVNULL, so a reader that could not start (a bad
+        # option, a refused RTSP handshake, a missing codec) died silently and
+        # the camera just showed "reconnecting" forever. Keep the last lines and
+        # report them once when ffmpeg exits by itself.
+        self._stderr_tail: deque[str] = deque(maxlen=20)
+        self._stderr_thread: threading.Thread | None = None
+        self._exit_reported = False
+        self._closing = False
 
     def command(self) -> list[str]:
         filters = [f"fps={self.fps}"]
@@ -340,18 +357,67 @@ class FFmpegFrameReader:
         ]
 
     def open(self) -> bool:
+        self._closing = False
+        self._exit_reported = False
+        self._stderr_tail.clear()
         try:
             self._process = subprocess.Popen(  # noqa: S603
                 self.command(),
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 bufsize=self.frame_bytes,
             )
         except (OSError, ValueError) as exc:
             logger.warning("cannot start ffmpeg for %s: %s", self.url, exc)
             self._process = None
             return False
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, args=(self._process.stderr,), daemon=True
+        )
+        self._stderr_thread.start()
         return True
+
+    def _drain_stderr(self, stream) -> None:  # noqa: ANN001
+        """Keep ffmpeg's error output drained and remember the tail.
+
+        Not draining a pipe deadlocks ffmpeg once the buffer is full.
+        """
+        try:
+            for raw in iter(stream.readline, b""):
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    self._stderr_tail.append(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    def _report_exit(self) -> None:
+        """Log why ffmpeg stopped, once per reader instance.
+
+        The pipe reaches EOF a moment before the process is reaped, so wait
+        briefly for the exit code: without it the report was skipped and a
+        camera that kept reconnecting left no explanation in the log at all.
+        """
+        if self._exit_reported or self._closing:
+            return
+        process = self._process
+        if process is None:
+            return
+        if process.poll() is None:
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                return
+        self._exit_reported = True
+        detail = " | ".join(self._stderr_tail) or "بدون خروجی خطا"
+        logger.warning(
+            "ffmpeg stopped for %s (exit=%s): %s", self.url, process.returncode, detail[:500]
+        )
 
     @property
     def running(self) -> bool:
@@ -362,10 +428,12 @@ class FFmpegFrameReader:
             return None
         raw = _read_exact(self._process.stdout, self.frame_bytes)
         if raw is None:
+            self._report_exit()
             return None
         return np.frombuffer(raw, dtype=np.uint8).reshape((self.height, self.width, 3))
 
     def close(self) -> None:
+        self._closing = True
         process = self._process
         self._process = None
         if process is None:
@@ -550,6 +618,7 @@ class CameraStream:
         self._detections: list[OverlayBox] = []
         self._last_detect_at = 0.0
         self._frames_window: list[float] = []
+        self._prev_read_at: float | None = None
         self._detect_window: list[float] = []
         #: ``time.monotonic()`` of the last live-view poll (0 = nobody watching).
         self._live_plain_at = 0.0
@@ -588,7 +657,7 @@ class CameraStream:
         """Signal the decode loop to end and wait for it (bounded).
 
         The join is time-boxed because a reader blocked inside a socket read
-        only returns after its ``-rw_timeout``; when it does not finish in time
+        only returns after its socket timeout; when it does not finish in time
         the thread is remembered instead of dropped, so a later ``start()``
         cannot run two decoders for one camera.
         """
@@ -782,7 +851,6 @@ class CameraStream:
         while not self._stop.is_set():
             reader = self._build_reader()
             local_file = is_local_source(self.config.rtsp_url)
-            spin = round(time.perf_counter(), 3)
             if not reader.open():
                 attempts += 1
                 self.health.dropped_frames += 1
@@ -801,6 +869,7 @@ class CameraStream:
                 continue
 
             self._backoff = backoff_initial
+            self._prev_read_at = None
             self.health.reconnect_count += 1
             self._set_state("online", None)
             consecutive_failures = 0
@@ -824,31 +893,44 @@ class CameraStream:
                 self.health.frames_total += 1
                 self.health.latency_ms = (read_done - loop_start) * 1000.0
                 self._record_rate(self._frames_window, read_done)
-                self.health.fps = _rate(self._frames_window)
+                # A reconnect (or the first seconds of a buffered RTSP session)
+                # delivers a burst of frames, and the 5 s window then reported
+                # 166 fps for a 20 fps camera - which also blew up the bitrate
+                # estimate and the health charts. Cap it at what the reader can
+                # physically deliver.
+                self.health.fps = min(_rate(self._frames_window), self.config.fps * 1.5)
 
                 expect_interval = 1.0 / max(1, self.config.fps)
-                drift = (read_done - loop_start) - expect_interval
-                self.health.jitter_ms = max(0.0, drift * 1000.0)
+                if self._prev_read_at is not None:
+                    # Jitter is how late a frame arrived against the camera's
+                    # cadence. It used to compare the *read duration* with the
+                    # interval, which is always ~2 ms, so the panel always
+                    # showed 0.0 ms even when frames were visibly stuttering.
+                    late_by = (read_done - self._prev_read_at) - expect_interval
+                    self.health.jitter_ms = max(0.0, late_by * 1000.0)
+                self._prev_read_at = read_done
                 if self._source_bitrate_kbps:
                     self.health.bitrate_kbps = self._source_bitrate_kbps
                 else:
-                    # No container metadata (common for live RTSP): report the
-                    # decoded throughput as a rough upper bound.
-                    frame_bytes = frame.nbytes
-                    self.health.bitrate_kbps = (
-                        frame_bytes * 8.0 / 1000.0 * max(0.1, self.health.fps)
-                    )
+                    # A live RTSP session rarely advertises an encoded bitrate,
+                    # and the decoded frame size is *not* a substitute: 720p at
+                    # 20 fps of raw BGR is ~350 Mbps, i.e. roughly 100x the real
+                    # stream, which the dashboard then showed as "355 Mbps".
+                    # Report "unknown" instead of a number that is wrong by two
+                    # orders of magnitude.
+                    self.health.bitrate_kbps = 0.0
 
                 self._publish_frame(frame)
 
                 if self._should_detect(read_done):
                     self._submit_detection(frame, read_done)
 
-                elapsed = time.perf_counter() - loop_start
-                sleep_for = expect_interval - elapsed
-                if sleep_for > 0 and self._stop.wait(sleep_for):
-                    break
-
+                # No extra sleep here on purpose. ffmpeg already paces the
+                # output to ``-vf fps=<config.fps>`` in real time, so
+                # sleeping again made the consumer slower than the producer
+                # (~16 fps for a 20 fps stream), filled the frame pipe and
+                # stalled the RTSP socket - which is what made MediaMTX drop
+                # the session every minute or so.
                 if not reader.running:
                     break
 
