@@ -89,7 +89,16 @@ foreach ($candidate in @($scriptDir, (Split-Path -Parent $scriptDir))) {
         break
     }
 }
-$out = if ($OutDir) { [System.IO.Path]::GetFullPath($OutDir) } else { Join-Path $scriptDir "offline" }
+# The bundle belongs next to backend/ and frontend/ (the project root), not inside
+# scripts/: that is where make_release.ps1 and install_offline.ps1 look for it,
+# and a 3.6 GB folder duplicated under scripts/ only confuses the next build.
+$out = if ($OutDir) {
+    [System.IO.Path]::GetFullPath($OutDir)
+} elseif ($repoRoot) {
+    Join-Path $repoRoot "offline"
+} else {
+    Join-Path $scriptDir "offline"
+}
 $wheels   = Join-Path $out "wheels"
 $modelsOut = Join-Path $out "models"
 $binOut   = Join-Path $out "bin"
