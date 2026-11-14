@@ -37,7 +37,7 @@ from app.services.camera_manager import manager
 from app.services.gpu import gpu_manager
 from app.services.models_registry import RFDETR_MODELS
 from app.services.retention import apply_retention
-from app.services.storage import storage_usage
+from app.services.storage import storage_usage_async
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/system", tags=["system"])
@@ -52,7 +52,10 @@ async def ping() -> dict:
 async def info(session: SessionDep) -> SystemInfo:
     now = utcnow()
     local = to_local(now, settings.timezone) or now
-    usage = storage_usage()
+    usage = await storage_usage_async()
+    # ``collect_components`` spawns ffmpeg and reads package metadata: it costs
+    # more than the whole request it feeds, so keep it off the event loop.
+    components = await asyncio.to_thread(env_service.collect_components)
     return SystemInfo(
         app_name=settings.app_name,
         version=settings.version,
@@ -67,7 +70,7 @@ async def info(session: SessionDep) -> SystemInfo:
         storage_bytes=int(usage["total_bytes"]),
         components=[
             SystemComponent(name=component.name, version=component.version, available=component.available)
-            for component in env_service.collect_components()
+            for component in components
         ],
         gpu=await asyncio.to_thread(_gpu_info),
     )
@@ -128,7 +131,8 @@ async def gpu() -> GPUInfo:
 
 @router.get("/compatibility", response_model=dict)
 async def compatibility() -> dict:
-    return env_service.compatibility_report()
+    # Imports torch and queries CUDA: hundreds of milliseconds on the event loop.
+    return await asyncio.to_thread(env_service.compatibility_report)
 
 
 @router.get("/models", response_model=list[ModelInfo])
@@ -207,7 +211,7 @@ async def init_db() -> dict:
 
 @router.get("/storage", response_model=StorageUsage)
 async def storage() -> StorageUsage:
-    return StorageUsage(**storage_usage())
+    return StorageUsage(**await storage_usage_async())
 
 
 # --------------------------------------------------------------------------

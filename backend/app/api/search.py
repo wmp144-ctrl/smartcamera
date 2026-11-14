@@ -113,6 +113,10 @@ async def export_spatial(
             buffer.seek(0)
             buffer.truncate(0)
 
+    # The CSV body is streamed after this handler returns; the rows are already
+    # materialised, so close the session now instead of pinning a pooled
+    # connection for the whole download (the same trap the MJPEG view had).
+    await session.close()
     filename = "camerasmart-spatial-search.csv"
     return StreamingResponse(
         rows(),

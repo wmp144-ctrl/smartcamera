@@ -14,8 +14,10 @@ the whole project can be copied to an offline machine unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -230,6 +232,14 @@ def directory_size(path: Path) -> int:
     return total
 
 
+#: The scan below walks every stored JPEG (304 ms for 3.8k files on the dev
+#: machine and growing with retention), while the dashboard asks for it every
+#: 20 s. Answers are reused for a few seconds: the numbers are read by a human
+#: in megabytes.
+_USAGE_TTL_SECONDS = 20.0
+_usage_cache: tuple[float, dict[str, object]] | None = None
+
+
 def storage_usage() -> dict[str, object]:
     """Total bytes plus a breakdown by camera and by object type."""
     root = settings.snapshots_dir
@@ -257,3 +267,21 @@ def storage_usage() -> dict[str, object]:
         "by_camera": by_camera,
         "by_type": by_type,
     }
+
+
+async def storage_usage_async(*, fresh: bool = False) -> dict[str, object]:
+    """Cached, non-blocking :func:`storage_usage` for request handlers.
+
+    Running the scan inline blocked the event loop for its whole duration: live
+    MJPEG frames and every API call stalled for ~300 ms on a small library (far
+    more after a month of recordings). The scan now runs in a worker thread and
+    its answer is reused for :data:`_USAGE_TTL_SECONDS`.
+    """
+    global _usage_cache
+    now = time.monotonic()
+    cached = _usage_cache
+    if not fresh and cached is not None and now - cached[0] < _USAGE_TTL_SECONDS:
+        return cached[1]
+    usage = await asyncio.to_thread(storage_usage)
+    _usage_cache = (now, usage)
+    return usage

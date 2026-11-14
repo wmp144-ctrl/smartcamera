@@ -22,14 +22,14 @@ from app.schemas.system import (
 from app.services import stats as stats_service
 from app.services.camera_manager import manager
 from app.services.heatmap import get_heatmap
-from app.services.storage import storage_usage
+from app.services.storage import storage_usage_async
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
 
 @router.get("/overview", response_model=OverviewStats)
 async def overview(session: SessionDep, days: Annotated[int, Query(ge=1, le=365)] = 14) -> OverviewStats:
-    usage = storage_usage()
+    usage = await storage_usage_async()
     return await stats_service.overview(
         session,
         states=manager.states(),
@@ -168,7 +168,7 @@ async def heatmap(
 
 @router.get("/storage", response_model=StorageUsage)
 async def storage() -> StorageUsage:
-    usage = storage_usage()
+    usage = await storage_usage_async()
     return StorageUsage(**usage)
 
 
