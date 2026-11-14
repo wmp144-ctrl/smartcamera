@@ -13,13 +13,11 @@ import json
 import logging
 import math
 import os
-import queue
 import shutil
 import subprocess
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from urllib.parse import unquote, urlparse
@@ -30,6 +28,8 @@ from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.services.annotate import OverlayBox, OverlayZone, draw_overlay
 from app.services.geometry import box_center
+from app.services.inference import scheduler
+from app.services.persistence import snapshot_writer
 from app.services.pipeline import DetectionPipeline, PipelineConfig, ZoneSpec
 from app.services.storage import to_pil
 
@@ -43,11 +43,9 @@ DEFAULT_HEIGHT = 720
 #: core per camera on JPEG encoding.
 LIVE_IDLE_GRACE_SECONDS = 3.0
 
-#: JPEG/PNG encoding for stored snapshots is CPU work that used to run on the
-#: decode thread, delaying the next frame (and the live view) by ~20-40 ms per
-#: object entering the scene. One background worker keeps that work off the
-#: video path while preserving the frame order of every camera.
-_SNAPSHOT_WRITER = ThreadPoolExecutor(max_workers=2, thread_name_prefix="snapshot-writer")
+#: Snapshots are written by ``app.services.persistence.snapshot_writer()``: a
+#: bounded pool of workers with its own queue, so a burst of objects can never
+#: turn into an unbounded backlog of encoded frames in RAM.
 
 #: How long ``start()`` waits for a decode thread a previous ``stop()`` could not
 #: finish joining (a reader blocked in a socket read returns after its timeout).
@@ -514,6 +512,16 @@ class StreamHealth:
     message: str | None = None
     frames_total: int = 0
     detections_total: int = 0
+    # --- processing telemetry ---------------------------------------------
+    #: Frames replaced in the camera's inference slot before they were analysed
+    #: (the newest frame always wins, so this is "skipped", not "lost").
+    detection_dropped: int = 0
+    #: Time waiting for the shared inference thread (last frame).
+    queue_wait_ms: float = 0.0
+    #: Motion + detection + tracking time for the last analysed frame.
+    inference_ms: float = 0.0
+    #: Stored snapshots dropped because the writer queue was full.
+    snapshot_dropped: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -529,6 +537,10 @@ class StreamHealth:
             "reconnect_count": self.reconnect_count,
             "last_frame_at": self.last_frame_at.isoformat() if self.last_frame_at else None,
             "message": self.message,
+            "detection_dropped": self.detection_dropped,
+            "queue_wait_ms": round(self.queue_wait_ms, 1),
+            "inference_ms": round(self.inference_ms, 1),
+            "snapshot_dropped": self.snapshot_dropped,
         }
 
 
@@ -563,6 +575,7 @@ class CameraRuntimeConfig:
             zones=list(self.zones),
             motion_sensitivity=self.motion_sensitivity,
             require_motion=settings.require_motion_for_detection,
+            detection_max_width=settings.detection_max_width,
             stationary_after_seconds=settings.stationary_after_seconds,
             track_max_age_seconds=settings.track_max_age_seconds,
             min_track_hits=settings.min_track_hits,
@@ -610,12 +623,9 @@ class CameraStream:
         #: inside a bounded socket read for a few seconds). They are joined by
         #: ``start()`` so the same camera never runs two decoders at once.
         self._orphan_threads: list[threading.Thread] = []
-        #: Detection runs on its own thread. Inferring inside the decode loop made
-        #: the camera blind for 40-120 ms per detection (the reader cannot pull
-        #: frames while torch is busy): visible stutter and dropped frames.
-        #: The queue holds **one** frame, so a newer frame replaces a waiting one.
-        self._detect_queue: queue.Queue[tuple[np.ndarray, float]] = queue.Queue(maxsize=1)
-        self._detect_thread: threading.Thread | None = None
+        #: Frames go to the process-wide inference scheduler, which owns the
+        #: only detector thread (see ``app.services.inference``). Nothing here
+        #: blocks on the model: the decode loop must keep pulling frames.
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._last_frame: np.ndarray | None = None
@@ -649,15 +659,11 @@ class CameraStream:
             self._set_state("error", "راه‌اندازی مجدد ناموفق بود؛ دوباره تلاش کنید")
             return
         self._stop.clear()
-        self._drain_detections()
+        scheduler.register(self.config.id)
         self._thread = threading.Thread(
             target=self._run, name=f"camera-{self.config.id}", daemon=True
         )
         self._thread.start()
-        self._detect_thread = threading.Thread(
-            target=self._detect_loop, name=f"detect-{self.config.id}", daemon=True
-        )
-        self._detect_thread.start()
 
     def stop(self, timeout: float = 6.0) -> None:
         """Signal the decode loop to end and wait for it (bounded).
@@ -677,13 +683,10 @@ class CameraStream:
                 logger.warning(
                     "camera %s: decode thread has not finished stopping yet", self.config.id
                 )
-        # The detector thread only *reads* frames, so it can be stopped after the
-        # decoder: pipeline state is swapped by ``reload()`` once both are done.
-        detect = self._detect_thread
-        self._detect_thread = None
-        if detect is not None and detect is not threading.current_thread():
-            detect.join(timeout)
-        self._drain_detections()
+        # Hand the camera's slot back: queued frames are dropped instead of run,
+        # so a stopped camera cannot keep the GPU busy or deliver results into a
+        # pipeline that is about to be released.
+        scheduler.unregister(self.config.id)
 
     def _join_orphans(self, timeout: float | None = None) -> bool:
         """Wait for threads left over by an earlier ``stop()``. True = no orphans."""
@@ -874,11 +877,21 @@ class CameraStream:
                 self._backoff = min(self._backoff * backoff_factor, backoff_max)
                 continue
 
-            self._backoff = backoff_initial
+            # NOTE: the backoff is *not* reset here. A server that accepts the
+            # RTSP session but has no stream (publisher gone) would reset it on
+            # every attempt and the retry cadence would stay at 1 s forever —
+            # 246 reconnects in a five minute outage, measured. It is reset
+            # below, once a session actually produced frames.
             self._prev_read_at = None
             self.health.reconnect_count += 1
             self._set_state("online", None)
             consecutive_failures = 0
+            # A camera whose server accepts the RTSP session but has no stream
+            # yet (the publisher is gone) opens *and* closes immediately. That
+            # used to loop once per second forever: 21 reconnects in 22 seconds
+            # of an outage, each one a full handshake. A session that delivered
+            # no frame is treated as a failed connect so the backoff applies.
+            session_frames = 0
 
             while not self._stop.is_set():
                 loop_start = time.perf_counter()
@@ -891,6 +904,7 @@ class CameraStream:
                         break
                     continue
                 consecutive_failures = 0
+                session_frames += 1
 
                 height, width = frame.shape[:2]
                 self.health.width = int(width)
@@ -943,11 +957,25 @@ class CameraStream:
             reader.close()
             if self._stop.is_set():
                 break
+            if session_frames == 0:
+                attempts += 1
+                self._set_state("reconnecting", "جریان تصویری روی این آدرس در دسترس نیست")
+                if max_retries and attempts > max_retries:
+                    self._set_state("error", "تعداد تلاش‌های اتصال به پایان رسید")
+                    return
+                if self._stop.wait(self._backoff):
+                    break
+                self._backoff = min(self._backoff * backoff_factor, backoff_max)
+                continue
             if local_file:
                 # A local file is not a live camera: replaying it would invent
                 # events that never happened. Play the clip once and stop.
                 self._set_state("offline", "پایان فایل ویدیویی")
                 return
+            # A session that delivered frames is a healthy connection: the next
+            # failure starts from the initial backoff again.
+            self._backoff = backoff_initial
+            attempts = 0
             self._set_state("reconnecting", "قطع ارتباط؛ تلاش مجدد")
             attempts += 1
             if max_retries and attempts > max_retries:
@@ -989,50 +1017,31 @@ class CameraStream:
         return True
 
     def _submit_detection(self, frame: np.ndarray, now: float) -> None:
-        """Queue a frame for the detection thread, replacing any waiting frame.
+        """Hand a frame to the shared inference scheduler.
 
-        Detection samples the stream (5 fps by default), so analysing the newest
-        frame is always preferable to working through a backlog of old ones.
+        Detection samples the stream (5 fps by default), so the scheduler's
+        per-camera slot holds one frame and a newer one replaces it: analysis
+        always sees the newest frame instead of working through a backlog.
         """
-        try:
-            self._detect_queue.put_nowait((frame, now))
-        except queue.Full:
-            try:
-                self._detect_queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._detect_queue.put_nowait((frame, now))
-            except queue.Full:  # pragma: no cover - extreme scheduling luck
-                pass
 
-    def _drain_detections(self) -> None:
-        while True:
-            try:
-                self._detect_queue.get_nowait()
-            except queue.Empty:
-                return
+        def job() -> None:
+            self._run_detection(frame, now)
 
-    def _detect_loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                frame, now = self._detect_queue.get(timeout=0.25)
-            except queue.Empty:
-                continue
-            try:
-                self._run_detection(frame, now)
-            except Exception:  # noqa: BLE001 - never let the worker die
-                logger.exception("detection loop failed for camera %s", self.config.id)
+        if not scheduler.submit(self.config.id, job):
+            self.health.detection_dropped += 1
 
     def _run_detection(self, frame: np.ndarray, now: float) -> None:
         pipeline = self.pipeline
         if pipeline is None:
             return
+        started = time.perf_counter()
         try:
             result = pipeline.process(frame, ts=utcnow(), now=now)
         except Exception:  # noqa: BLE001 - detection must never kill the stream
             logger.exception("detection failed for camera %s", self.config.id)
             return
+        self.health.inference_ms = (time.perf_counter() - started) * 1000.0
+        self.health.queue_wait_ms = scheduler.wait_ms(self.config.id)
 
         self.health.detections_total += len(result.detections)
         self._record_rate(self._detect_window, now)
@@ -1076,7 +1085,15 @@ class CameraStream:
                     except Exception:  # noqa: BLE001
                         logger.exception("result callback failed for camera %s", camera.id)
 
-            _SNAPSHOT_WRITER.submit(write_and_forward)
+            if not snapshot_writer().submit(write_and_forward):
+                # The disk is behind: keep the metadata, drop the pixels, and
+                # say so instead of slowing the whole pipeline down.
+                self.health.snapshot_dropped += len(result.snapshots)
+                if deliver:
+                    try:
+                        callback(self.config, result)  # type: ignore[misc]
+                    except Exception:  # noqa: BLE001
+                        logger.exception("result callback failed for camera %s", self.config.id)
             return
 
         if deliver:

@@ -268,3 +268,58 @@ async def test_automatic_retention_loop_runs_and_stops(monkeypatch) -> None:
         await task
 
     assert calls == [1]
+
+
+# --------------------------------------------------------------------------
+# performance profile
+# --------------------------------------------------------------------------
+async def test_performance_endpoint_reports_profile_and_fixed_batch(client) -> None:
+    response = await client.get("/api/system/performance")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    profile = body["profile"]
+    for key in (
+        "stream_fps",
+        "detection_fps",
+        "detection_max_width",
+        "inference_queue_size",
+        "snapshot_workers",
+        "snapshot_queue_size",
+        "persist_batch_max",
+        "fp16",
+        "device",
+    ):
+        assert key in profile, key
+    assert profile["inference_queue_size"] >= 1
+    # Batch inference is reported as fixed, never as a knob that cannot work.
+    assert body["fixed"]["batch_size"]["editable"] is False
+    assert "hardware" in body
+
+
+async def test_performance_update_persists_and_is_bounded(client, monkeypatch, tmp_path) -> None:
+    from app.api import system as system_module
+    from app.services import performance as performance_module
+
+    monkeypatch.setattr(
+        performance_module, "profile_path", lambda: tmp_path / "performance.json"
+    )
+    applied: list[dict] = []
+    monkeypatch.setattr(
+        system_module, "apply_profile", lambda profile: applied.append(as_dict(profile))
+    )
+
+    ok = await client.put("/api/system/performance", json={"inference_queue_size": 2})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["changed"]["inference_queue_size"] == 2
+    assert applied and applied[-1]["inference_queue_size"] == 2
+    assert (tmp_path / "performance.json").is_file()
+
+    bad = await client.put("/api/system/performance", json={"stream_fps": 500})
+    assert bad.status_code == 422, bad.text
+    assert "stream_fps" in bad.text
+
+
+def as_dict(profile) -> dict:  # noqa: ANN001
+    from dataclasses import asdict
+
+    return asdict(profile)

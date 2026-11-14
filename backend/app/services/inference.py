@@ -1,0 +1,298 @@
+"""Central inference scheduler: one GPU, many cameras, no starvation.
+
+RF-DETR can only run one frame at a time on a single GPU, so every camera used
+to own a detector thread that simply blocked on a shared lock. That had three
+consequences that looked like "the app hangs" once more than two cameras
+detected:
+
+* **unfairness** — a camera that won the lock twice in a row made another wait
+  for a whole extra inference, so with four cameras one could be blind for a
+  second at a time;
+* **staleness** — each camera's own queue was fine, but results still arrived
+  out of order, seconds after the frame they described;
+* **thread pile-up** — N threads spent their lives inside ``lock.wait()``,
+  doing nothing but competing.
+
+This module replaces that with a single dispatcher thread and a *slot* per
+camera:
+
+* a slot holds at most ``queue_size`` frames (default 1) and a new frame
+  **replaces** the waiting one — a scheduler never works on a frame that is no
+  longer the newest one the camera has;
+* the dispatcher walks the cameras with waiting frames round-robin, so every
+  camera gets at most one turn per round and none can starve another;
+* the model is loaded once (the detector registry) and called from this single
+  thread, which is also the only place that measures inference time, queue wait
+  and dropped frames.
+
+The scheduler knows nothing about cameras, pipelines or torch: it runs callables.
+That keeps it unit-testable and usable with a CPU-only setup (the same path,
+just a slower callable).
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+
+#: A job is one sampled frame's worth of work (motion + detect + track).
+Job = Callable[[], Any]
+
+
+@dataclass
+class CameraStats:
+    submitted: int = 0
+    processed: int = 0
+    dropped: int = 0
+    errors: int = 0
+    last_wait_ms: float = 0.0
+    max_wait_ms: float = 0.0
+    last_inference_ms: float = 0.0
+    #: exponential moving average of the time one job takes
+    avg_inference_ms: float = 0.0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "submitted": self.submitted,
+            "processed": self.processed,
+            "dropped": self.dropped,
+            "errors": self.errors,
+            "wait_ms": round(self.last_wait_ms, 1),
+            "max_wait_ms": round(self.max_wait_ms, 1),
+            "inference_ms": round(self.last_inference_ms, 1),
+            "avg_inference_ms": round(self.avg_inference_ms, 1),
+        }
+
+
+@dataclass
+class _Slot:
+    frames: deque[tuple[float, Job]] = field(default_factory=deque)
+    #: guards ``frames`` only; held for microseconds, never across a job
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class InferenceScheduler:
+    """Run every camera's detection work on one fair, round-robin thread."""
+
+    def __init__(self, *, queue_size: int = 1, name: str = "inference") -> None:
+        self._queue_size = max(1, int(queue_size))
+        self._name = name
+        self._slots: dict[int, _Slot] = {}
+        self._ready: deque[int] = deque()
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._stats: dict[int, CameraStats] = {}
+        self._current: int | None = None
+        self._rounds = 0
+        self._last_job_ms = 0.0
+        self._last_wait_ms = 0.0
+        self._started_at = 0.0
+
+    # -- configuration -----------------------------------------------------
+    @property
+    def queue_size(self) -> int:
+        return self._queue_size
+
+    def set_queue_size(self, size: int, *, drain: bool = True) -> None:
+        """Change the per-camera slot capacity at runtime.
+
+        Lowering it keeps only the newest frame of every camera, which is what
+        the new capacity would have allowed anyway.
+        """
+        size = max(1, int(size))
+        with self._lock:
+            self._queue_size = size
+            if drain:
+                for camera_id, slot in self._slots.items():
+                    stats = self._stats.get(camera_id)
+                    while len(slot.frames) > size:
+                        slot.frames.popleft()
+                        if stats is not None:
+                            stats.dropped += 1
+
+    # -- camera registration ----------------------------------------------
+    def register(self, camera_id: int) -> None:
+        with self._lock:
+            self._slots.setdefault(camera_id, _Slot())
+            self._stats.setdefault(camera_id, CameraStats())
+
+    def unregister(self, camera_id: int) -> None:
+        """Forget a camera: its waiting frames are dropped, not run.
+
+        Called on stop/delete/reload so a removed camera cannot keep the GPU
+        busy (or deliver results after its pipeline was released).
+        """
+        with self._lock:
+            slot = self._slots.pop(camera_id, None)
+            if slot is not None:
+                stats = self._stats.get(camera_id)
+                if stats is not None:
+                    stats.dropped += len(slot.frames)
+            self._ready = deque(cid for cid in self._ready if cid != camera_id)
+
+    # -- submission --------------------------------------------------------
+    def submit(self, camera_id: int, job: Job) -> bool:
+        """Queue one job for a camera.
+
+        Returns ``False`` when the slot was full, i.e. the previous waiting
+        frame was replaced: the caller can count that as a dropped detection
+        (the newest frame is always the one that runs).
+        """
+        self._ensure_thread()
+        with self._lock:
+            slot = self._slots.get(camera_id)
+            if slot is None:
+                slot = self._slots[camera_id] = _Slot()
+            stats = self._stats.setdefault(camera_id, CameraStats())
+            stats.submitted += 1
+            fresh = not slot.frames
+            accepted = fresh
+            slot.frames.append((time.monotonic(), job))
+            if len(slot.frames) > self._queue_size:
+                slot.frames.popleft()
+                stats.dropped += 1
+                accepted = False
+            if fresh:
+                self._ready.append(camera_id)
+        self._wake.set()
+        return accepted
+
+    def wait_ms(self, camera_id: int) -> float:
+        """How long the last job of this camera waited for the shared thread."""
+        with self._lock:
+            stats = self._stats.get(camera_id)
+            return round(stats.last_wait_ms, 1) if stats is not None else 0.0
+
+    def pending(self) -> int:
+        with self._lock:
+            return sum(len(slot.frames) for slot in self._slots.values())
+
+    # -- dispatcher --------------------------------------------------------
+    def _ensure_thread(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._started_at = time.monotonic()
+            self._thread = threading.Thread(
+                target=self._run, name=self._name, daemon=True
+            )
+            self._thread.start()
+
+    def _next_job(self) -> tuple[int, float, Job] | None:
+        with self._lock:
+            while self._ready:
+                camera_id = self._ready.popleft()
+                slot = self._slots.get(camera_id)
+                if slot is None or not slot.frames:
+                    continue
+                queued_at, job = slot.frames.popleft()
+                # A camera that still has frames waiting goes to the *back* of
+                # the queue (round-robin). Without this re-arm, the second frame
+                # of a camera that submitted while it was running would never be
+                # picked up: it was neither "fresh" (the slot was not empty) nor
+                # in the ready list.
+                if slot.frames:
+                    self._ready.append(camera_id)
+                return camera_id, queued_at, job
+            return None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._wake.wait(0.2)
+            self._wake.clear()
+            job = self._next_job()
+            while job is not None and not self._stop.is_set():
+                camera_id, queued_at, fn = job
+                stats = self._stats.setdefault(camera_id, CameraStats())
+                wait_ms = (time.monotonic() - queued_at) * 1000.0
+                self._last_wait_ms = wait_ms
+                stats.last_wait_ms = wait_ms
+                stats.max_wait_ms = max(stats.max_wait_ms, wait_ms)
+                self._current = camera_id
+                started = time.perf_counter()
+                try:
+                    fn()
+                except Exception:  # noqa: BLE001 - one camera must not stop the rest
+                    stats.errors += 1
+                    logger.exception("inference job failed for camera %s", camera_id)
+                finally:
+                    elapsed = (time.perf_counter() - started) * 1000.0
+                    self._current = None
+                    self._last_job_ms = elapsed
+                    stats.last_inference_ms = elapsed
+                    stats.avg_inference_ms = (
+                        elapsed
+                        if stats.avg_inference_ms <= 0
+                        else 0.8 * stats.avg_inference_ms + 0.2 * elapsed
+                    )
+                    stats.processed += 1
+                    self._rounds += 1
+                job = self._next_job()
+
+    # -- introspection -----------------------------------------------------
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            cameras = {str(cid): stats.as_dict() for cid, stats in self._stats.items()}
+            pending = sum(len(slot.frames) for slot in self._slots.values())
+            current = self._current
+        total = CameraStats()
+        for item in self._stats.values():
+            total.submitted += item.submitted
+            total.processed += item.processed
+            total.dropped += item.dropped
+            total.errors += item.errors
+        return {
+            "running": bool(self._thread is not None and self._thread.is_alive()),
+            "queue_size": self._queue_size,
+            "pending": pending,
+            "cameras": len(cameras),
+            "processed": total.processed,
+            "dropped": total.dropped,
+            "errors": total.errors,
+            "busy_camera": current,
+            "inference_ms": round(self._last_job_ms, 1),
+            "queue_wait_ms": round(self._last_wait_ms, 1),
+            "rounds": self._rounds,
+            "uptime_seconds": (
+                round(time.monotonic() - self._started_at, 1) if self._started_at else 0.0
+            ),
+            "detail": cameras,
+        }
+
+    def reset(self) -> None:
+        """Forget every camera and its counters (tests, camera reset)."""
+        with self._lock:
+            self._slots.clear()
+            self._ready.clear()
+            self._stats.clear()
+            self._rounds = 0
+            self._last_job_ms = 0.0
+            self._last_wait_ms = 0.0
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Stop the dispatcher thread, abandoning anything still queued."""
+        self._stop.set()
+        self._wake.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+            if thread.is_alive():
+                logger.warning("inference scheduler did not stop within %.1fs", timeout)
+        self.reset()
+
+
+#: Process-wide scheduler. Cameras submit through this, the detector registry
+#: keeps the single model instance it runs.
+scheduler = InferenceScheduler(queue_size=1)

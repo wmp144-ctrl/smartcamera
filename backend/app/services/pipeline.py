@@ -83,6 +83,11 @@ class PipelineConfig:
     record_objects: bool = True
     record_snapshots: bool = True
     alert_cooldown_seconds: float = 30.0
+    #: Optional downscale (in pixels of width) applied *only* to the frame given
+    #: to the detector. Detections are normalised to the array they were found
+    #: in, so boxes and zones stay valid on the full-resolution frame; the live
+    #: view is never affected. 0 disables it.
+    detection_max_width: int = 0
     direction_min_displacement: float = 0.01
     direction_window_seconds: float = 2.0
     line_min_displacement: float = 0.002
@@ -233,10 +238,27 @@ class DetectionPipeline:
         self.alert_engine = alert_engine or AlertEngine(config.alert_cooldown_seconds)
         self._runtime: dict[int, _TrackRuntime] = {}
         self._alert_rules: list[AlertRule] = []
+        # Zone lists used to be rebuilt per detection and per track (several
+        # list comprehensions per frame per object). They only change when the
+        # configuration does, so they are cached here.
+        self._zones_ready = False
+        self._polygon_zones: list[ZoneSpec] = []
+        self._process_zones: list[ZoneSpec] = []
+        self._ignore_zones: list[ZoneSpec] = []
+        self._line_zones: list[ZoneSpec] = []
         self.rebuild_rules()
 
     # -- configuration -----------------------------------------------------
+    def _refresh_zones(self) -> None:
+        polygon = [z for z in self.config.zones if z.enabled and z.is_polygon]
+        self._polygon_zones = polygon
+        self._process_zones = [z for z in polygon if z.kind in PROCESS_KINDS]
+        self._ignore_zones = [z for z in polygon if z.kind == "ignore"]
+        self._line_zones = [z for z in self.config.zones if z.enabled and z.is_line]
+        self._zones_ready = True
+
     def rebuild_rules(self) -> None:
+        self._refresh_zones()
         if not settings.alerts_enabled:
             # Master switch in Settings: zone rules stay configured but produce
             # no alerts (sirens/notifications off during e.g. maintenance).
@@ -267,19 +289,27 @@ class DetectionPipeline:
     # -- helpers -----------------------------------------------------------
     @property
     def polygon_zones(self) -> list[ZoneSpec]:
-        return [z for z in self.config.zones if z.enabled and z.is_polygon]
+        if not self._zones_ready:
+            self._refresh_zones()
+        return self._polygon_zones
 
     @property
     def line_zones(self) -> list[ZoneSpec]:
-        return [z for z in self.config.zones if z.enabled and z.is_line]
+        if not self._zones_ready:
+            self._refresh_zones()
+        return self._line_zones
 
     @property
     def process_zones(self) -> list[ZoneSpec]:
-        return [z for z in self.polygon_zones if z.kind in PROCESS_KINDS]
+        if not self._zones_ready:
+            self._refresh_zones()
+        return self._process_zones
 
     @property
     def ignore_zones(self) -> list[ZoneSpec]:
-        return [z for z in self.polygon_zones if z.kind == "ignore"]
+        if not self._zones_ready:
+            self._refresh_zones()
+        return self._ignore_zones
 
     def _min_motion(self, object_type: str) -> float:
         rule = self.config.class_config.get(object_type)
@@ -290,7 +320,6 @@ class DetectionPipeline:
         return 0.0
 
     def _in_process_region(self, detection: Detection) -> bool:
-        center = box_center(detection.bbox)
         for zone in self.ignore_zones:
             if box_center_in_polygon(detection.bbox, zone.points):
                 return False
@@ -319,6 +348,23 @@ class DetectionPipeline:
             for zone in self.process_zones
             if box_center_in_polygon(track.bbox, zone.points)
         ]
+
+    def _detector_frame(self, array: np.ndarray) -> np.ndarray:
+        """The frame handed to the model: optional downscale, always writeable.
+
+        RF-DETR normalises its output to the image it was given, so a smaller
+        inference frame yields the same *normalised* boxes. ``ascontiguousarray``
+        also guarantees a writeable buffer, which is what ``torch.from_numpy``
+        requires (a read-only view makes it warn on every frame).
+        """
+        limit = self.config.detection_max_width
+        height, width = array.shape[:2]
+        if limit and width > limit:
+            step = max(2, -(-width // limit))
+            array = np.ascontiguousarray(array[::step, ::step])
+        elif not array.flags.writeable:
+            array = np.ascontiguousarray(array)
+        return array
 
     # -- main --------------------------------------------------------------
     def process(
@@ -352,7 +398,7 @@ class DetectionPipeline:
 
         detections: list[Detection] = []
         if run_detection and self.detector is not None:
-            raw = self.detector.detect(array)
+            raw = self.detector.detect(self._detector_frame(array))
             filtered = filter_detections(raw, self.config.class_config)
             detections = [d for d in filtered if self._in_process_region(d)]
         result.ran_detection = run_detection
@@ -764,7 +810,7 @@ class DetectionPipeline:
 # small helpers
 # --------------------------------------------------------------------------
 def _box_px(bbox_norm: list[float], frame: np.ndarray) -> list[float]:
-    height, width = np.asarray(frame).shape[:2]
+    height, width = frame.shape[:2] if hasattr(frame, "shape") else np.asarray(frame).shape[:2]
     return [
         bbox_norm[0] * width,
         bbox_norm[1] * height,

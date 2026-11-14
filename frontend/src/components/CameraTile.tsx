@@ -1,5 +1,5 @@
 import { ExternalLink, Eye, EyeOff, ScanEye, TriangleAlert, Video, VideoOff } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type Camera, type CameraStatus } from "../lib/api";
 import {
@@ -29,7 +29,37 @@ export function CameraTile({
   const overlay = useUI((state) => state.isOverlay(camera.id));
   const setOverlay = useUI((state) => state.setOverlay);
   const detection = useLive((state) => state.detections[camera.id]);
+  const gridLiveFps = useUI((state) => state.gridLiveFps);
   const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  // A tile that scrolled out of view (or a background tab) must not keep an
+  // MJPEG connection open: the backend encodes and the browser decodes every
+  // frame, which is pure CPU for pixels nobody sees.
+  const [visible, setVisible] = useState(true);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      (entries) => setVisible(entries.some((entry) => entry.isIntersecting)),
+      { rootMargin: "160px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  // A dropped MJPEG connection is normal (camera restarted, backend busy);
+  // retry with backoff instead of leaving a dead frame on screen forever.
+  useEffect(() => {
+    if (!failed) return;
+    const delay = Math.min(15_000, 1500 * 2 ** Math.min(attempt, 4));
+    const timer = window.setTimeout(() => {
+      setFailed(false);
+      setAttempt((value) => value + 1);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [failed, attempt]);
 
   const tone = stateTone(status?.state);
   const resolution =
@@ -41,15 +71,20 @@ export function CameraTile({
 
   const liveUrl = useMemo(
     // Grid tiles do not need the camera's full frame rate: each MJPEG stream
-    // costs CPU in the backend, and 12 fps is indistinguishable at tile size.
-    () => api.cameras.liveUrl(camera.id, overlay, Math.min(camera.fps || 20, 12)),
-    [camera.id, camera.fps, overlay],
+    // costs CPU in the backend, so the tile asks for the user-configured rate
+    // (default 10 fps) capped by the camera's own stream rate. `attempt` is a
+    // cache-buster that re-opens the stream after a failure.
+    () =>
+      `${api.cameras.liveUrl(camera.id, overlay, Math.min(camera.fps || 20, gridLiveFps))}${
+        attempt ? `&r=${attempt}` : ""
+      }`,
+    [camera.id, camera.fps, overlay, gridLiveFps, attempt],
   );
 
   return (
-    <div className={cn("panel group overflow-hidden", className)}>
+    <div ref={containerRef} className={cn("panel group overflow-hidden", className)}>
       <div className="relative aspect-video w-full overflow-hidden bg-[#050a14]">
-        {live && !failed ? (
+        {live && !failed && visible ? (
           <img
             key={liveUrl}
             src={liveUrl}

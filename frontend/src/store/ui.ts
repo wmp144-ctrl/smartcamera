@@ -33,6 +33,8 @@ interface UIState {
   desktopNotifications: boolean;
   volume: number;
   autoRefreshSeconds: number;
+  /** Frame rate the camera tiles request for the live view (MJPEG costs CPU). */
+  gridLiveFps: number;
   notifications: LiveNotification[];
   unreadAlerts: number;
 
@@ -46,6 +48,7 @@ interface UIState {
   setDesktopNotifications: (value: boolean) => void;
   setVolume: (value: number) => void;
   setAutoRefresh: (seconds: number) => void;
+  setGridLiveFps: (fps: number) => void;
   pushNotification: (notification: LiveNotification) => void;
   dismissNotification: (id: string) => void;
   clearNotifications: () => void;
@@ -63,6 +66,7 @@ export const useUI = create<UIState>()(
       desktopNotifications: false,
       volume: 0.6,
       autoRefreshSeconds: 15,
+      gridLiveFps: 10,
       notifications: [],
       unreadAlerts: 0,
 
@@ -77,6 +81,7 @@ export const useUI = create<UIState>()(
       setDesktopNotifications: (value) => set({ desktopNotifications: value }),
       setVolume: (value) => set({ volume: value }),
       setAutoRefresh: (seconds) => set({ autoRefreshSeconds: seconds }),
+      setGridLiveFps: (fps) => set({ gridLiveFps: Math.max(1, Math.min(20, Math.round(fps))) }),
       pushNotification: (notification) =>
         set((state) => ({
           notifications: [notification, ...state.notifications].slice(0, 40),
@@ -98,6 +103,7 @@ export const useUI = create<UIState>()(
         desktopNotifications: state.desktopNotifications,
         volume: state.volume,
         autoRefreshSeconds: state.autoRefreshSeconds,
+        gridLiveFps: state.gridLiveFps,
       }),
     },
   ),

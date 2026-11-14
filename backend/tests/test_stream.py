@@ -673,3 +673,37 @@ def test_start_refuses_to_run_two_decoders(monkeypatch) -> None:
     stream.start()  # the previous decoder is gone, so a new one may run
     assert wait_for(lambda: stream.running)
     stream.stop()
+
+
+def test_session_without_frames_backs_off_instead_of_looping() -> None:
+    """A path that opens but never delivers a frame must not reconnect in a spin.
+
+    MediaMTX accepts the RTSP session for a path whose publisher is gone and
+    closes it at once. Reconnecting immediately turned a 20 s outage into 21
+    full handshakes per camera (measured); the backoff now applies because a
+    session that produced no frame counts as a failed connect.
+    """
+    readers: list[FakeReader] = []
+
+    def factory(_config) -> FakeReader:
+        reader = FakeReader(fail_at=0)  # open() succeeds, every read returns None
+        readers.append(reader)
+        return reader
+
+    config = make_config(
+        reconnect_policy={
+            "backoff_initial": 0.2,
+            "backoff_max": 0.4,
+            "backoff_factor": 2.0,
+        }
+    )
+    stream = CameraStream(config, reader_factory=factory)
+    stream.start()
+    try:
+        time.sleep(2.0)
+    finally:
+        stream.stop()
+
+    # Without the backoff this was one reconnect per ~1 s (hundreds after a
+    # five minute outage); with it, two seconds allow only a handful.
+    assert 2 <= len(readers) <= 8, f"{len(readers)} reconnects in two seconds"

@@ -8,13 +8,17 @@ track id), which makes persisting idempotent across frames.
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models.camera import Zone
 from app.models.detection import Event, ObjectImage, TrackRecord
@@ -26,6 +30,159 @@ from app.services.pipeline import PipelineConfig, PipelineResult, SnapshotReques
 from app.services.storage import SavedImages, delete_relative, save_object_images
 
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------
+# snapshot writer (JPEG encode + disk, off the video path)
+# --------------------------------------------------------------------------
+class SnapshotWriter:
+    """Bounded worker pool that writes stored snapshots.
+
+    Encoding three JPEGs per object used to happen on the video thread (20-40 ms)
+    and later on an *unbounded* ``ThreadPoolExecutor``: with eight cameras in
+    motion the work piled up without limit, RAM filled with frames and the live
+    view lagged further and further behind. A bounded queue turns that into a
+    visible, counted drop instead of an invisible slowdown: the newest evidence
+    still gets stored, and ``/api/system/runtime`` says how much was lost.
+    """
+
+    def __init__(self, workers: int = 2, capacity: int = 64) -> None:
+        self._lock = threading.Lock()
+        self._queue: queue.Queue[Callable[[], Any] | None] = queue.Queue(
+            maxsize=max(1, int(capacity))
+        )
+        self._workers = max(1, int(workers))
+        self._capacity = max(1, int(capacity))
+        self._threads: list[threading.Thread] = []
+        self._submitted = 0
+        self._done = 0
+        self._dropped = 0
+        self._errors = 0
+        self._last_error: str | None = None
+        self._queued_at: list[float] = []
+        self._last_wait_ms = 0.0
+        for index in range(self._workers):
+            self._spawn(index)
+
+    # -- workers -----------------------------------------------------------
+    def _spawn(self, index: int) -> None:
+        thread = threading.Thread(
+            target=self._work, args=(index,), name=f"snapshot-writer-{index}", daemon=True
+        )
+        thread.start()
+        self._threads.append(thread)
+
+    def _work(self, index: int) -> None:
+        while True:
+            with self._lock:
+                if index >= self._workers:
+                    return  # resized down: this worker retires
+                pending = self._queue
+            try:
+                task = pending.get(timeout=0.3)
+            except queue.Empty:
+                continue
+            if task is None:
+                return
+            started = time.monotonic()
+            try:
+                task()
+            except Exception as exc:  # noqa: BLE001 - a bad frame must not kill the writer
+                with self._lock:
+                    self._errors += 1
+                    self._last_error = f"{type(exc).__name__}: {exc}"
+                logger.warning("snapshot write failed: %s", exc)
+            finally:
+                with self._lock:
+                    self._done += 1
+                    if self._queued_at:
+                        self._last_wait_ms = (started - self._queued_at.pop(0)) * 1000.0
+
+    # -- api ---------------------------------------------------------------
+    def submit(self, task: Callable[[], Any]) -> bool:
+        """Queue work; ``False`` means the queue was full and it was dropped."""
+        with self._lock:
+            self._submitted += 1
+            try:
+                self._queue.put_nowait(task)
+            except queue.Full:
+                self._dropped += 1
+                if self._dropped == 1 or self._dropped % 50 == 0:
+                    logger.warning(
+                        "snapshot queue full (capacity %d); %d snapshot(s) dropped so far",
+                        self._capacity,
+                        self._dropped,
+                    )
+                return False
+            self._queued_at.append(time.monotonic())
+        return True
+
+    def resize(self, workers: int, capacity: int) -> None:
+        """Apply new worker/queue sizes without losing what is already queued."""
+        workers = max(1, int(workers))
+        capacity = max(1, int(capacity))
+        with self._lock:
+            if workers == self._workers and capacity == self._capacity:
+                return
+            preserved: list[Callable[[], Any] | None] = []
+            while True:
+                try:
+                    preserved.append(self._queue.get_nowait())
+                except queue.Empty:
+                    break
+            overflow = max(0, len(preserved) - capacity)
+            if overflow:
+                # Oldest pending frames are the ones an operator least needs.
+                preserved = preserved[overflow:]
+                self._dropped += overflow
+            self._capacity = capacity
+            self._queue = queue.Queue(maxsize=capacity)
+            for item in preserved:
+                self._queue.put_nowait(item)
+            self._workers = workers
+            while len(self._threads) < workers:
+                self._spawn(len(self._threads))
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "workers": self._workers,
+                "capacity": self._capacity,
+                "queued": self._queue.qsize(),
+                "submitted": self._submitted,
+                "written": self._done,
+                "dropped": self._dropped,
+                "errors": self._errors,
+                "last_error": self._last_error,
+                "queue_wait_ms": round(self._last_wait_ms, 1),
+            }
+
+    def shutdown(self) -> None:
+        with self._lock:
+            for _ in self._threads:
+                try:
+                    self._queue.put_nowait(None)
+                except queue.Full:
+                    break
+        for thread in self._threads:
+            thread.join(timeout=2.0)
+        self._threads.clear()
+
+
+_writer: SnapshotWriter | None = None
+_writer_lock = threading.Lock()
+
+
+def snapshot_writer() -> SnapshotWriter:
+    """Process-wide writer, created from the current performance profile."""
+    global _writer  # noqa: PLW0603 - one writer per process
+    with _writer_lock:
+        if _writer is None:
+            _writer = SnapshotWriter(
+                workers=settings.snapshot_workers,
+                capacity=settings.snapshot_queue_size,
+            )
+        return _writer
 
 
 def materialize_snapshots(config: PipelineConfig, result: PipelineResult) -> int:

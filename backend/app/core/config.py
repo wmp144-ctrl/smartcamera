@@ -93,11 +93,39 @@ class Settings(BaseSettings):
     require_motion_for_detection: bool = True
     # GPU device for RF-DETR: "cuda", "cuda:0" or "cpu".
     device: str = "cuda"
+    #: Half precision for RF-DETR: "auto" times FP32 and FP16 once when the
+    #: model loads and keeps the faster one (an RTX card with Tensor Cores wins
+    #: with FP16, a GTX 16xx without them loses). "on"/"off" force a choice.
+    fp16: str = "auto"
+    #: Trace/compile the model for inference with rfdetr's ``inference()``.
+    #: Removes the "Model is not optimized for inference" warning and shortens
+    #: every frame; set to false only if tracing fails on the installed build.
+    optimize_for_inference: bool = True
+    #: Let cuDNN/cuBLAS use TF32 on Ampere and newer cards.
+    allow_tf32: bool = True
     jpeg_quality: int = 80
     # Live-view JPEGs are downscaled to this width to keep many cameras cheap.
     live_max_width: int = 960
     #: Hard cap on the MJPEG frame rate a client may ask for.
     live_max_fps: int = 20
+
+    # --- inference scheduling / storage workers ------------------------------
+    #: Downscale the frame handed to RF-DETR before inference; 0 hands over the
+    #: decoded frame (the model resizes internally anyway). Detections come back
+    #: normalised, so bounding boxes stay correct on the full-resolution frame.
+    detection_max_width: int = 0
+    #: Frames that may wait per camera for the shared inference thread. 1 means
+    #: "newest frame wins": a result is never older than one inference.
+    inference_queue_size: int = 1
+    #: Threads that write stored snapshots (JPEG encode + disk).
+    snapshot_workers: int = 2
+    #: Snapshots allowed to wait for a free writer before new ones are dropped.
+    snapshot_queue_size: int = 64
+    #: Pipeline results persisted per transaction.
+    persist_batch_max: int = 16
+    #: Logical cores left alone when the model runs on the CPU (ffmpeg needs
+    #: them to keep decoding while torch is busy).
+    cpu_reserve_cores: int = 1
     #: Stored evidence images are capped at this width (0 = original).
     snapshot_max_width: int = 1280
     # Path to ffmpeg/ffprobe; "ffmpeg" resolves from PATH.

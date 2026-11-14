@@ -452,3 +452,39 @@ def test_moving_track_records_path_and_replay_frames() -> None:
     assert offsets == sorted(offsets)
     centres = [point[1] for point in path]
     assert centres[-1] > centres[0], "the object moved to the right"
+
+
+# --------------------------------------------------------------------------
+# inference input resolution
+# --------------------------------------------------------------------------
+def test_detection_max_width_downscales_only_the_model_input() -> None:
+    """The detector gets a smaller frame; boxes stay valid on the real one."""
+    seen: list[tuple[int, int]] = []
+
+    class _SizeDetector:
+        name = "size"
+        available = True
+
+        def detect(self, incoming):  # noqa: ANN001, ANN201
+            seen.append(incoming.shape[:2])
+            assert incoming.flags.writeable, "torch.from_numpy needs a writeable array"
+            return [person(0.4)]
+
+    pipeline = DetectionPipeline(make_config(detection_max_width=160), _SizeDetector())
+    result = pipeline.process(frame(), ts=_t(0), now=0.0)
+
+    assert seen, "the detector was never called"
+    height, width = seen[0]
+    assert height <= 90 and width <= 160, seen[0]
+    assert width > 80, "a 320px frame must be halved, not shrunk to nothing"
+    # Detection coordinates are normalised to the frame they were found in, so
+    # the box is unchanged on the full-resolution frame.
+    assert result.detections[0].bbox == pytest.approx([0.4, 0.3, 0.6, 0.7])
+
+
+def test_read_only_frames_are_copied_before_inference() -> None:
+    incoming = frame()
+    incoming.setflags(write=False)
+    pipeline = make_pipeline(scripted([[person(0.2)]]))
+    result = pipeline.process(incoming, ts=_t(0), now=0.0)
+    assert result.ran_detection is True

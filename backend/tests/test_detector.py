@@ -18,6 +18,7 @@ from app.services.detector import (
     RFDetrDetector,
     build_detector,
     parse_raw_output,
+    wants_half_precision,
 )
 
 
@@ -171,3 +172,71 @@ def test_detector_uses_the_checkpoint_installed_with_the_app(tmp_path, monkeypat
     explicit = tmp_path / "custom.pth"
     explicit.write_bytes(b"x")
     assert RFDetrDetector("rf-detr-base", weights_path=explicit).weights_path == explicit
+
+
+# --------------------------------------------------------------------------
+# precision / device scaling
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("choice", "cuda", "name", "capability", "expected"),
+    [
+        # Ampere workstation card with Tensor Cores: FP16 is the fast path.
+        ("auto", True, "NVIDIA RTX A2000", (8, 6), True),
+        ("auto", True, "NVIDIA GeForce RTX 3060", (8, 6), True),
+        # GTX 16xx has Turing capability but no Tensor Cores: FP16 was 3.6x
+        # slower when measured on that card, so it must stay on FP32.
+        ("auto", True, "NVIDIA GeForce GTX 1650", (7, 5), False),
+        # Pascal and older, unknown capability, and CPU: never FP16.
+        ("auto", True, "NVIDIA GeForce GTX 1050", (6, 1), False),
+        ("auto", True, "Some GPU", None, False),
+        ("auto", False, "NVIDIA RTX A2000", (8, 6), False),
+        # Forced choices win over the heuristic.
+        ("on", True, "NVIDIA GeForce GTX 1650", (7, 5), True),
+        ("off", True, "NVIDIA RTX A2000", (8, 6), False),
+    ],
+)
+def test_wants_half_precision(choice, cuda, name, capability, expected) -> None:
+    assert wants_half_precision(choice, cuda, name, capability) is expected
+
+
+def test_optimize_is_skipped_when_disabled(monkeypatch) -> None:
+    """``optimize_for_inference=false`` must not touch the model at all."""
+    import app.services.detector as detector_module
+
+    class _Model:
+        calls = 0
+
+        def inference(self, **kwargs):  # noqa: ANN003, ANN201
+            self.calls += 1
+
+    monkeypatch.setattr(
+        detector_module,
+        "settings",
+        type("S", (), {"optimize_for_inference": False})(),
+        raising=False,
+    )
+    model = _Model()
+    RFDetrDetector("rf-detr-nano")._optimize(model)
+    assert model.calls == 0
+
+
+def test_measured_latency_scales_the_detection_budget() -> None:
+    """An RTX card must not be budgeted like the reference GTX 1650."""
+    from app.services import models_registry as registry_module
+
+    registry_module.reset_speed_factor()
+    try:
+        # 45 ms/frame for base = ~22 fps, roughly twice the 9 fps baseline.
+        factor = registry_module.note_measured_latency("rf-detr-base", 45.0)
+        assert factor == pytest.approx(22.22 / 9.0, rel=0.02)
+        assert registry_module.detection_capacity("rf-detr-base") > 18
+        # Two cameras at 5 fps now fit Base instead of being pushed to Small.
+        assert registry_module.suggest_model(2, 5.0) == "rf-detr-base"
+        assert registry_module.suggest_model(4, 5.0) == "rf-detr-small"
+
+        # A slower-than-reference measurement scales the other way.
+        registry_module.note_measured_latency("rf-detr-base", 400.0)
+        assert registry_module.detection_capacity("rf-detr-base") < 9
+    finally:
+        registry_module.reset_speed_factor()
+    assert registry_module.detection_capacity("rf-detr-base") == 9

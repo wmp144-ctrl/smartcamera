@@ -27,6 +27,7 @@ import {
   type Message,
   type ModelInfo,
   type ObjectFilters,
+  type PerformanceProfile,
   type Setting,
   type SpatialSearchRequest,
   type SpatialSearchResult,
@@ -66,6 +67,7 @@ export const keys = {
   models: ["models"] as const,
   settings: ["settings"] as const,
   runtime: ["runtime"] as const,
+  performance: ["performance"] as const,
   compatibility: ["compatibility"] as const,
   spatialSearch: (payload: unknown) => ["spatial-search", payload] as const,
 };
@@ -541,6 +543,26 @@ export function useRuntime(refetchInterval = 5000) {
     queryKey: keys.runtime,
     queryFn: () => api.system.runtime(),
     refetchInterval,
+  });
+}
+
+export function usePerformance() {
+  return useQuery({
+    queryKey: keys.performance,
+    queryFn: () => api.system.performance(),
+    staleTime: 15_000,
+  });
+}
+
+export function useSavePerformance() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: Partial<PerformanceProfile>) => api.system.putPerformance(payload),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: keys.performance });
+      void client.invalidateQueries({ queryKey: keys.runtime });
+      void client.invalidateQueries({ queryKey: keys.cameras });
+    },
   });
 }
 

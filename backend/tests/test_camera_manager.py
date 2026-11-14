@@ -259,3 +259,55 @@ def test_detector_preload_args_skip_disabled_cameras() -> None:
         id=5, enabled=False, detection_enabled=True, model_name="rf-detr-base", model_weights=None
     )
     assert CameraManager.detector_preload_args(disabled) is None
+
+
+async def test_persist_batch_drops_results_of_a_camera_deleted_mid_flight(
+    session, monkeypatch
+) -> None:
+    """A delete that races the persister must drop results, not raise.
+
+    The camera existed when the check ran (streams can still be draining), so
+    the INSERT hits a foreign-key error. Reporting that as a crash per queued
+    frame filled the log; the results now go away with one info line.
+    """
+    from app.core.timeutil import utcnow
+    from app.services.pipeline import PipelineResult, TrackSnapshot
+    from app.services.stream import CameraRuntimeConfig
+
+    config = CameraRuntimeConfig(id=999, name="حذف‌شده", rtsp_url="rtsp://example/x")
+    now = utcnow()
+    snapshot = TrackSnapshot(
+        runtime_track_id=1,
+        object_type="person",
+        confidence=0.9,
+        first_seen=now,
+        last_seen=now,
+        duration_seconds=0.1,
+        motion_state="moving",
+        direction="right",
+        velocity_x=0.1,
+        velocity_y=0.0,
+        distance_travelled=0.1,
+        bbox_first=[0.1, 0.1, 0.2, 0.2],
+        bbox_last=[0.11, 0.1, 0.21, 0.2],
+        status="active",
+        entered_frame=True,
+        exited_frame=False,
+        zone_id=None,
+        crossed_line_id=None,
+        line_direction=None,
+        frame_count=2,
+        meta={},
+    )
+    result = PipelineResult(timestamp=now, camera_id=999, started_tracks=[snapshot])
+
+    calls = {"count": 0}
+
+    async def fake_exists(camera_id: int) -> bool:  # noqa: ARG001
+        calls["count"] += 1
+        return calls["count"] == 1  # existed for the batch, gone when re-checked
+
+    monkeypatch.setattr(manager, "_camera_exists", fake_exists)
+    await manager._persist_batch(config, [result])  # must not raise
+
+    assert calls["count"] >= 2, "the delete must be detected by a second check"

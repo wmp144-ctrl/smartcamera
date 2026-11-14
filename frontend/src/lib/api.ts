@@ -300,6 +300,28 @@ export interface GPUInfo {
   devices: GPUMetric[];
 }
 
+/** Performance knobs editable from the Settings page (backend profile). */
+export interface PerformanceProfile {
+  stream_fps: number;
+  detection_fps: number;
+  detection_max_width: number;
+  inference_queue_size: number;
+  snapshot_workers: number;
+  snapshot_queue_size: number;
+  persist_batch_max: number;
+  fp16: "auto" | "on" | "off";
+  device: string;
+}
+
+export interface PerformanceInfo {
+  profile: PerformanceProfile;
+  editable: string[];
+  hardware: Record<string, unknown>;
+  speed_factor: number;
+  live: Record<string, unknown>;
+  fixed: Record<string, unknown>;
+}
+
 export interface ModelInfo {
   key: string;
   name: string;
@@ -739,6 +761,12 @@ export const api = {
     putSetting: (key: string, value: unknown) =>
       put<Setting>(`/api/system/settings/${encodeURIComponent(key)}`, { value }),
     runtime: () => get<Record<string, unknown>>("/api/system/runtime"),
+    performance: () => get<PerformanceInfo>("/api/system/performance"),
+    putPerformance: (payload: Partial<PerformanceProfile>) =>
+      put<{ ok: boolean; changed: Record<string, unknown>; profile: PerformanceProfile }>(
+        "/api/system/performance",
+        payload,
+      ),
     runRetention: (days?: number, dryRun = false) =>
       post<Record<string, unknown>>("/api/system/retention/run", { days, dry_run: dryRun }),
     initDb: () => post<{ ok: boolean; detail: string }>("/api/system/maintenance/init-db"),

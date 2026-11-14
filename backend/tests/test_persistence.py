@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -369,3 +371,84 @@ async def test_relative_paths_are_portable(session, camera_id) -> None:
     image = (await session.execute(select(ObjectImage))).scalars().one()
     assert not image.full_path.startswith(("/", "C:"))
     assert image.full_path.startswith(f"objects/{camera_id}/")
+
+
+# --------------------------------------------------------------------------
+# bounded snapshot writer
+# --------------------------------------------------------------------------
+def test_snapshot_writer_drops_instead_of_growing_without_bound() -> None:
+    from app.services.persistence import SnapshotWriter
+
+    gate = threading.Event()
+    done: list[int] = []
+    started = threading.Event()
+
+    def gate_task() -> None:
+        started.set()
+        gate.wait(3.0)
+
+    # Capacity 1 and one busy worker: the second snapshot cannot be queued.
+    writer = SnapshotWriter(workers=1, capacity=1)
+    try:
+        writer.submit(gate_task)
+        assert started.wait(2.0), "the writer never picked up the blocking task"
+        assert writer.submit(lambda: done.append(1)) is True
+        assert writer.submit(lambda: done.append(2)) is False
+        gate.set()
+        deadline = time.monotonic() + 5.0
+        while not done and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert done == [1]
+        stats = writer.stats()
+        assert stats["dropped"] == 1
+        assert stats["written"] >= 2
+    finally:
+        gate.set()
+        writer.shutdown()
+
+
+def test_snapshot_writer_resize_keeps_queued_work() -> None:
+    from app.services.persistence import SnapshotWriter
+
+    gate = threading.Event()
+    started = threading.Event()
+    done: list[str] = []
+
+    def gate_task() -> None:
+        started.set()
+        gate.wait(3.0)
+
+    writer = SnapshotWriter(workers=1, capacity=4)
+    try:
+        writer.submit(gate_task)
+        assert started.wait(2.0)
+        writer.submit(lambda: done.append("a"))
+        writer.submit(lambda: done.append("b"))
+        writer.resize(workers=2, capacity=4)
+        gate.set()
+        deadline = time.monotonic() + 5.0
+        while len(done) < 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert sorted(done) == ["a", "b"]
+        assert writer.stats()["workers"] == 2
+    finally:
+        gate.set()
+        writer.shutdown()
+
+
+def test_snapshot_writer_reports_errors_without_dying() -> None:
+    from app.services.persistence import SnapshotWriter
+
+    ran = threading.Event()
+    writer = SnapshotWriter(workers=1, capacity=2)
+    try:
+        def boom() -> None:
+            raise OSError("disk full")
+
+        assert writer.submit(boom) is True
+        assert writer.submit(ran.set) is True
+        assert ran.wait(3.0), "a failing snapshot must not stop the worker"
+        assert writer.stats()["errors"] == 1
+        assert "disk full" in (writer.stats()["last_error"] or "")
+    finally:
+        writer.shutdown()

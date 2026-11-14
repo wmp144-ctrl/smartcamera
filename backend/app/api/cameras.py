@@ -32,7 +32,7 @@ from app.schemas.camera import (
 from app.schemas.common import Message
 from app.schemas.system import HealthRead
 from app.services.camera_manager import manager, runtime_config_from_camera, zones_from_camera
-from app.services.models_registry import RFDETR_MODELS, suggest_model
+from app.services.models_registry import RFDETR_MODELS, speed_factor, suggest_model
 from app.services.stream import probe_stream
 
 logger = logging.getLogger(__name__)
@@ -208,11 +208,21 @@ async def available_models() -> dict:
     loaded = {item["model_key"]: item for item in detector_registry.loaded()}
     return {
         "models": [
-            {**spec.to_dict(), "loaded": key in loaded, "error": loaded.get(key, {}).get("error")}
+            {
+                **spec.to_dict(),
+                "loaded": key in loaded,
+                "error": loaded.get(key, {}).get("error"),
+                # What the loaded model actually runs as: "fp16" on a Tensor-core
+                # card when the measurement said it is faster, else "fp32".
+                "precision": loaded.get(key, {}).get("precision"),
+                "latency_ms": loaded.get(key, {}).get("latency_ms"),
+            }
             for key, spec in RFDETR_MODELS.items()
         ],
         "default": settings.default_model,
         "device": settings.device,
+        "fp16": settings.fp16,
+        "speed_factor": speed_factor(),
     }
 
 

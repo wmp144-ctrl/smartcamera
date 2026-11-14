@@ -461,13 +461,15 @@ class ObjectTracker:
         height, width = array.shape[:2]
         scale = min(1.0, 320.0 / max(width, 1))
         try:
-            gray = cv2.cvtColor(array, cv2.COLOR_BGR2GRAY)
+            # Resize *before* the colour conversion: shrinking a 1080p BGR frame
+            # costs a fraction of converting all 2 million pixels first.
             if scale < 1.0:
-                gray = cv2.resize(
-                    gray, (max(16, int(width * scale)), max(16, int(height * scale))),
+                array = cv2.resize(
+                    array,
+                    (max(16, int(width * scale)), max(16, int(height * scale))),
                     interpolation=cv2.INTER_AREA,
                 )
-            gray = gray.astype(np.float32)
+            gray = cv2.cvtColor(array, cv2.COLOR_BGR2GRAY).astype(np.float32)
         except Exception:  # noqa: BLE001
             return (0.0, 0.0)
 

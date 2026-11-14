@@ -25,7 +25,7 @@ import time
 from datetime import timedelta
 
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
@@ -45,8 +45,10 @@ from app.services.bus import (
 )
 from app.services.detector import registry as detector_registry
 from app.services.heatmap import HeatmapBuffer, flush_buffer
-from app.services.models_registry import detection_capacity, suggest_model
-from app.services.persistence import PersistOutcome, Persister
+from app.services.inference import scheduler
+from app.services.models_registry import detection_capacity, speed_factor, suggest_model
+from app.services.performance import apply_profile, load_profile
+from app.services.persistence import PersistOutcome, Persister, snapshot_writer
 from app.services.pipeline import DetectionPipeline, PipelineResult, ZoneSpec
 from app.services.stream import CameraRuntimeConfig, CameraStream
 
@@ -128,8 +130,8 @@ class CameraManager:
         #: camera id -> (exists, checked_at). A removed camera whose stream is
         #: still draining results used to recreate rows for a dead camera id.
         self._camera_cache: dict[int, tuple[bool, float]] = {}
-        self._queue: queue.Queue[tuple[CameraRuntimeConfig, PipelineResult]] = queue.Queue(
-            maxsize=settings.result_queue_size
+        self._queue: queue.Queue[tuple[CameraRuntimeConfig, PipelineResult, float]] = (
+            queue.Queue(maxsize=settings.result_queue_size)
         )
         self.heatmap = HeatmapBuffer()
         self._tasks: list[asyncio.Task] = []
@@ -142,6 +144,18 @@ class CameraManager:
         self._last_detect_publish: dict[int, float] = {}
         self._detector_errors: dict[int, str] = {}
         self._dropped_results = 0
+        # --- persistence telemetry ----------------------------------------
+        self._persisted_results = 0
+        self._persist_batches = 0
+        self._persist_errors = 0
+        self._last_persist_error: str | None = None
+        self._last_persist_wait_ms = 0.0
+        #: (time, snapshot) of the last CPU/RAM/VRAM probe (it costs ~1 ms).
+        self._resources_cache: tuple[float, dict] | None = None
+        #: One long-lived psutil handle: ``cpu_percent(None)`` reports the share
+        #: since the *previous* call on the same object, so creating a new
+        #: ``Process()`` per poll always answered 0.0%.
+        self._process_handle: object | None = None
 
     # -- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
@@ -150,6 +164,12 @@ class CameraManager:
         self._loop = asyncio.get_running_loop()
         bus.bind_loop(self._loop)
         self._running = True
+        # Apply the saved performance profile (Settings page) before any camera
+        # starts, so the first model load already uses the right device/FP16.
+        try:
+            apply_profile(load_profile())
+        except Exception:  # noqa: BLE001 - a bad profile must not block boot
+            logger.exception("could not apply the saved performance profile")
         self._tasks = [
             asyncio.create_task(self._consume_loop(), name="camera-manager-consume"),
             asyncio.create_task(self._heatmap_loop(), name="camera-manager-heatmap"),
@@ -172,6 +192,7 @@ class CameraManager:
             stream.stop()
             _detach_detector(stream)
         self._streams.clear()
+        scheduler.shutdown()
         await self._flush_heatmap()
         logger.info("camera manager stopped")
 
@@ -388,6 +409,10 @@ class CameraManager:
         self.apply_camera(camera)
 
     # -- live accessors ----------------------------------------------------
+    def stream_ids(self) -> list[int]:
+        """Ids of every camera that currently has a stream object."""
+        return list(self._streams)
+
     def states(self) -> dict[int, str]:
         return {camera_id: stream.health.state for camera_id, stream in self._streams.items()}
 
@@ -436,6 +461,9 @@ class CameraManager:
             "models": models,
             "overloaded": overloaded,
             "suggested_model": suggest_model(cameras, average) if cameras else None,
+            # 1.0 = the reference GPU; >1 means this card measured faster, so
+            # every capacity above is already scaled by it.
+            "speed_factor": speed_factor(),
         }
 
     def active_detection_cameras(self) -> int:
@@ -517,7 +545,9 @@ class CameraManager:
 
     # -- result handling ---------------------------------------------------
     def _on_result(self, config: CameraRuntimeConfig, result: PipelineResult) -> None:
-        item = (config, result)
+        # The enqueue timestamp is what makes "queue latency" measurable: a
+        # growing wait here means the database cannot keep up with detection.
+        item = (config, result, time.monotonic())
         try:
             self._queue.put_nowait(item)
         except queue.Full:
@@ -559,22 +589,27 @@ class CameraManager:
             # versus ~2.4 ms when batched. Frames of one camera share a
             # transaction so a failure cannot roll back another camera's data.
             batch = [first]
-            while len(batch) < PERSIST_BATCH_MAX:
+            limit = max(1, int(settings.persist_batch_max))
+            while len(batch) < limit:
                 try:
                     batch.append(self._queue.get_nowait())
                 except queue.Empty:
                     break
 
+            self._last_persist_wait_ms = (time.monotonic() - first[2]) * 1000.0
             grouped_results: dict[int, list[PipelineResult]] = {}
             grouped_configs: dict[int, CameraRuntimeConfig] = {}
-            for config, result in batch:
+            for config, result, _queued_at in batch:
                 grouped_results.setdefault(config.id, []).append(result)
                 grouped_configs.setdefault(config.id, config)
 
+            self._persist_batches += 1
             for camera_id, results in grouped_results.items():
                 try:
                     await self._persist_batch(grouped_configs[camera_id], results)
-                except Exception:  # noqa: BLE001 - must not stop the loop
+                except Exception as exc:  # noqa: BLE001 - must not stop the loop
+                    self._persist_errors += 1
+                    self._last_persist_error = f"{type(exc).__name__}: {exc}"
                     logger.exception("persisting results for camera %s failed", camera_id)
 
     async def _persist_batch(
@@ -600,6 +635,32 @@ class CameraManager:
                         outcomes.append(
                             (result, await persister.persist(session, pipeline_config, result))
                         )
+            except IntegrityError as exc:
+                # The camera row can disappear between the existence check and
+                # the insert (an operator deletes the camera while its stream is
+                # still draining results, or a reload races the delete). That is
+                # not a bug in the data: re-check, and drop the results instead
+                # of logging a foreign-key traceback per queued frame.
+                self._camera_cache.pop(config.id, None)
+                if not await self._camera_exists(config.id):
+                    logger.info(
+                        "camera %s was deleted while persisting; dropped %d result(s)",
+                        config.id,
+                        len(results),
+                    )
+                    self._persisters.pop(config.id, None)
+                    return
+                if attempt + 1 >= PERSIST_RETRIES:
+                    raise
+                logger.warning(
+                    "integrity error while persisting camera %s (retry %d/%d): %s",
+                    config.id,
+                    attempt + 1,
+                    PERSIST_RETRIES - 1,
+                    exc,
+                )
+                await asyncio.sleep(PERSIST_RETRY_DELAY * (attempt + 1))
+                continue
             except OperationalError as exc:
                 if attempt + 1 >= PERSIST_RETRIES:
                     raise
@@ -613,6 +674,7 @@ class CameraManager:
                 await asyncio.sleep(PERSIST_RETRY_DELAY * (attempt + 1))
                 continue
             break
+        self._persisted_results += len(results)
         # Publishing happens only after the commit: the UI must never see an
         # event that was rolled back.
         for result, outcome in outcomes:
@@ -776,8 +838,62 @@ class CameraManager:
                     HealthMetric.__table__.delete().where(HealthMetric.recorded_at < cutoff)
                 )
 
+    def _resource_stats(self) -> dict:
+        """CPU/RAM/VRAM of this process, sampled at most every two seconds.
+
+        ``psutil`` reads /proc (or the Windows equivalent) for the whole process;
+        doing it on every dashboard poll added measurable event-loop time, so the
+        last sample is reused. ``cpu_percent`` is normalised by the core count,
+        which is what an operator expects to see next to "8 threads".
+        """
+        now = time.monotonic()
+        cached = self._resources_cache
+        if cached is not None and now - cached[0] < 2.0:
+            return cached[1]
+        data: dict = {
+            "process_cpu_percent": None,
+            "process_rss_mb": None,
+            "threads": None,
+            "system_cpu_percent": None,
+            "system_memory_percent": None,
+            "vram_used_mb": None,
+            "vram_total_mb": None,
+        }
+        try:
+            import psutil  # noqa: PLC0415 - optional telemetry dependency
+
+            process = self._process_handle
+            if process is None:
+                process = psutil.Process()
+                self._process_handle = process
+                process.cpu_percent(None)  # prime the since-last-call counter
+            with process.oneshot():
+                cores = psutil.cpu_count(logical=True) or 1
+                data["process_cpu_percent"] = round(process.cpu_percent(None) / cores, 1)
+                data["process_rss_mb"] = round(process.memory_info().rss / (1024 * 1024), 1)
+                data["threads"] = process.num_threads()
+                data["system_cpu_percent"] = psutil.cpu_percent(None)
+                data["system_memory_percent"] = psutil.virtual_memory().percent
+        except Exception:  # noqa: BLE001 - telemetry must never break the dashboard
+            logger.debug("process telemetry unavailable", exc_info=True)
+        try:
+            import torch  # noqa: PLC0415
+
+            if torch.cuda.is_available():
+                data["vram_used_mb"] = round(
+                    torch.cuda.memory_reserved(0) / (1024 * 1024), 1
+                )
+                data["vram_total_mb"] = round(
+                    torch.cuda.get_device_properties(0).total_memory / (1024 * 1024), 1
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        self._resources_cache = (now, data)
+        return data
+
     @property
     def stats(self) -> dict:
+        inference = scheduler.stats()
         return {
             "streams": len(self._streams),
             "detection_cameras": self.active_detection_cameras(),
@@ -787,6 +903,20 @@ class CameraManager:
             "subscribers": bus.subscriber_count,
             "models": detector_registry.loaded(),
             "detection_budget": self.detection_budget,
+            "inference": inference,
+            "persistence": {
+                "queue_depth": self._queue.qsize(),
+                "queue_capacity": self._queue.maxsize,
+                "batch_max": max(1, int(settings.persist_batch_max)),
+                "processed": self._persisted_results,
+                "batches": self._persist_batches,
+                "dropped": self._dropped_results,
+                "errors": self._persist_errors,
+                "last_error": self._last_persist_error,
+                "queue_wait_ms": round(self._last_persist_wait_ms, 1),
+            },
+            "snapshots": snapshot_writer().stats(),
+            "resources": self._resource_stats(),
         }
 
 

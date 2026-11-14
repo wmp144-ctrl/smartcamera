@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence, runtime_checkable
@@ -27,6 +28,7 @@ from app.services.models_registry import (
     COCO_CLASSES,
     ModelSpec,
     get_model_spec,
+    note_measured_latency,
 )
 from app.services.tracker import Detection
 
@@ -110,6 +112,10 @@ class RFDetrDetector:
         self._lock = threading.RLock()
         self._load_error: str | None = None
         self._reported_error: str | None = None
+        #: "fp16" / "fp32" — what the last optimisation actually used.
+        self.precision = "fp32"
+        #: Mean time of one ``predict`` call measured at load (0 = not measured).
+        self.latency_ms = 0.0
 
     def _installed_weights(self) -> Path | None:
         """Checkpoint installed with the app (``backend/data/models``).
@@ -141,7 +147,9 @@ class RFDetrDetector:
             if self._model is not None:
                 return True
             try:
+                self._configure_torch()
                 model = self._build_model()
+                self._optimize(model)
             except Exception as exc:  # noqa: BLE001 - report, never crash the API
                 self._load_error = f"{type(exc).__name__}: {exc}"
                 # Warn once per distinct reason, not once per retry.
@@ -175,6 +183,123 @@ class RFDetrDetector:
         model = cls(**kwargs)
         return model
 
+    # -- optimisation ------------------------------------------------------
+    def _configure_torch(self) -> None:
+        """Thread count for CPU inference; GPUs do not need it.
+
+        torch defaults to one thread per core, so a CPU-only box had every core
+        inside the model while eight ffmpeg decoders competed for the same cores
+        (frame rate collapsed under load). Leaving ``cpu_reserve_cores`` free
+        keeps decode independent of inference. A GPU run is unaffected.
+        """
+        try:
+            import os  # noqa: PLC0415
+
+            import torch  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 - torch is optional
+            return
+        if self.device and str(self.device).startswith("cuda"):
+            return
+        cores = os.cpu_count() or 2
+        usable = max(1, cores - max(0, int(settings.cpu_reserve_cores)))
+        try:
+            torch.set_num_threads(usable)
+            logger.info("CPU inference uses %d of %d cores", usable, cores)
+        except Exception:  # noqa: BLE001
+            logger.debug("could not set torch thread count", exc_info=True)
+
+    def _on_cuda(self, torch: Any) -> bool:
+        if self.device and not str(self.device).startswith("cuda"):
+            return False
+        return bool(torch.cuda.is_available())
+
+    def _optimize(self, model: Any) -> None:
+        """Trace the model once, in the precision this GPU actually wins at.
+
+        RF-DETR prints "Model is not optimized for inference" on every frame
+        until ``inference()`` is called; that call also traces the model at a
+        fixed resolution, which is where most of the per-frame win comes from.
+
+        FP16 is chosen from the hardware (see :func:`wants_half_precision`) and
+        **traced once**. Benchmarking both precisions here looked attractive but
+        cost 1.3 GB of host RAM and 12 extra seconds at load (three traced
+        copies of the model live at the same time, measured on this machine); a
+        camera server that runs for weeks cannot pay that.
+
+        Any failure leaves the plain model in place: detection still works, just
+        without the compiled graph.
+        """
+        if not settings.optimize_for_inference:
+            return
+        try:
+            import torch  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 - optional dependency
+            return
+
+        cuda = self._on_cuda(torch)
+        if cuda:
+            torch.backends.cudnn.benchmark = True
+            if settings.allow_tf32:
+                torch.backends.cudnn.allow_tf32 = True
+                torch.backends.cuda.matmul.allow_tf32 = True
+                try:
+                    torch.set_float32_matmul_precision("high")
+                except Exception:  # noqa: BLE001 - older torch
+                    pass
+
+        choice = (settings.fp16 or "auto").strip().lower()
+        if choice not in {"auto", "on", "off"}:
+            choice = "auto"
+        name = ""
+        capability: tuple[int, int] | None = None
+        if cuda:
+            try:
+                name = str(torch.cuda.get_device_name(0))
+                major, minor = torch.cuda.get_device_capability(0)
+                capability = (int(major), int(minor))
+            except Exception:  # noqa: BLE001
+                name, capability = "", None
+
+        use_half = wants_half_precision(choice, cuda, name, capability)
+        dtype = torch.float16 if use_half else torch.float32
+        try:
+            model.inference(compile=True, dtype=dtype)
+        except Exception as exc:  # noqa: BLE001 - a plain model still detects
+            logger.warning(
+                "could not optimize %s for inference (%s); running uncompiled",
+                self.model_key,
+                exc,
+            )
+            return
+        self.precision = "fp16" if use_half else "fp32"
+
+        blank = np.zeros((self.spec.resolution, self.spec.resolution, 3), dtype=np.uint8)
+        measured = self._time_predict(model, blank)
+        if measured:
+            self.latency_ms = round(float(measured), 1)
+            if cuda:
+                factor = note_measured_latency(self.model_key, self.latency_ms)
+                logger.info(
+                    "%s ready on %s: %s, %.1f ms/frame (device speed x%.2f)",
+                    self.model_key,
+                    name or self.device or "auto",
+                    self.precision,
+                    self.latency_ms,
+                    factor,
+                )
+
+    @staticmethod
+    def _time_predict(model: Any, frame: np.ndarray, runs: int = 3) -> float:
+        """Fastest of ``runs`` predictions, ignoring the first (graph warm-up)."""
+        best: float | None = None
+        for index in range(runs + 1):
+            started = time.perf_counter()
+            model.predict(frame, threshold=FLOOR_THRESHOLD)
+            elapsed = (time.perf_counter() - started) * 1000.0
+            if index and (best is None or elapsed < best):
+                best = elapsed
+        return float(best or 0.0)
+
     def warmup(self) -> bool:
         if not self.load():
             return False
@@ -189,6 +314,8 @@ class RFDetrDetector:
     def close(self) -> None:
         with self._lock:
             self._model = None
+            self.precision = "fp32"
+            self.latency_ms = 0.0
             try:
                 import torch  # noqa: PLC0415
 
@@ -220,6 +347,40 @@ class RFDetrDetector:
             return model.predict(frame, threshold=FLOOR_THRESHOLD)
         except TypeError:
             return model.predict(frame)
+
+
+def wants_half_precision(
+    choice: str,
+    cuda: bool,
+    device_name: str = "",
+    capability: tuple[int, int] | None = None,
+) -> bool:
+    """Whether FP16 inference should be used on this device.
+
+    ``auto`` enables FP16 on GPUs that have FP16 Tensor Cores, because the win
+    there is large (An A2000-class card halves the time per frame) and it is a
+    loss everywhere else: a GTX 16xx has the compute capability of Turing but
+    *no* Tensor Cores, and measured 106 ms → 382 ms per frame in FP16. It is
+    therefore excluded by name rather than by capability.
+
+    This is a hardware question, not a measurement, so the answer costs nothing
+    at startup and the model is traced only once.
+    """
+    if not cuda:
+        return False
+    if choice == "on":
+        return True
+    if choice == "off":
+        return False
+    if capability is None:
+        return False
+    major, _minor = capability
+    if major < 7:  # Pascal and older: FP16 is emulated or slower
+        return False
+    lowered = (device_name or "").lower()
+    if "gtx 16" in lowered:  # Turing die without Tensor Cores
+        return False
+    return True
 
 
 def parse_raw_output(raw: Any, width: int, height: int) -> list[Detection]:
@@ -429,6 +590,8 @@ class DetectorRegistry:
                     "refs": count,
                     "available": det.available,
                     "error": det.load_error,
+                    "precision": det.precision,
+                    "latency_ms": det.latency_ms,
                 }
                 for det, count in self._cache.values()
             ]

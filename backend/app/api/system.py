@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import platform
+from dataclasses import asdict
 from datetime import date, datetime, timedelta
+
 from fastapi import APIRouter, Body, HTTPException, Query  # noqa: F401
 from sqlalchemy import select
 
@@ -35,7 +37,15 @@ from app.schemas.system import (
 from app.services import environment as env_service
 from app.services.camera_manager import manager
 from app.services.gpu import gpu_manager
-from app.services.models_registry import RFDETR_MODELS
+from app.services.models_registry import RFDETR_MODELS, speed_factor
+from app.services.performance import (
+    EDITABLE_FIELDS,
+    apply_profile,
+    hardware_summary,
+    load_profile,
+    save_profile,
+    validate,
+)
 from app.services.retention import apply_retention
 from app.services.storage import storage_usage_async
 
@@ -179,7 +189,7 @@ async def upsert_setting(
 
 @router.get("/runtime", response_model=dict)
 async def runtime_stats() -> dict:
-    """In-process telemetry: queue depth, models loaded, subscribers."""
+    """In-process telemetry: queues, inference scheduler, resources, models."""
     return {
         "manager": manager.stats,
         "cameras": manager.all_health(),
@@ -190,6 +200,78 @@ async def runtime_stats() -> dict:
             "require_motion": settings.require_motion_for_detection,
             "stationary_after_seconds": settings.stationary_after_seconds,
         },
+    }
+
+
+@router.get("/performance", response_model=dict)
+async def get_performance() -> dict:
+    """Effective performance profile + what this machine can do.
+
+    ``batch_size`` is reported as a *fixed* value instead of a knob: RF-DETR is
+    traced for a single image at load time (``model.inference(batch_size=1)``)
+    and ``predict([a, b])`` raises on that graph, so exposing a batch slider
+    would only produce a setting that cannot work.
+    """
+    profile = load_profile()
+    from app.services.inference import scheduler  # noqa: PLC0415
+    from app.services.persistence import snapshot_writer  # noqa: PLC0415
+
+    return {
+        "profile": asdict(profile),
+        "editable": list(EDITABLE_FIELDS),
+        "hardware": hardware_summary(),
+        "speed_factor": speed_factor(),
+        "live": {
+            "inference_queue": scheduler.stats(),
+            "snapshot_writer": snapshot_writer().stats(),
+            "persistence_batch_max": settings.persist_batch_max,
+            "device": settings.device,
+            "fp16": settings.fp16,
+        },
+        "fixed": {
+            "batch_size": {
+                "value": 1,
+                "editable": False,
+                "reason": (
+                    "RF-DETR در زمان بارگذاری برای یک تصویر trace می‌شود؛ "
+                    "batch>1 نیاز به بازسازی مدل دارد و این نسخه پشتیبانی نمی‌کند"
+                ),
+            }
+        },
+    }
+
+
+@router.put("/performance", response_model=dict)
+async def put_performance(payload: dict = Body(...)) -> dict:
+    """Save a partial performance profile and apply it without a restart."""
+    clean, errors = validate(payload or {})
+    if errors:
+        raise HTTPException(status_code=422, detail="؛ ".join(errors))
+    if not clean:
+        return {"ok": True, "changed": {}, "detail": "تغییری ارسال نشد"}
+
+    profile = load_profile()
+    previous = asdict(profile)
+    for key, value in clean.items():
+        setattr(profile, key, value)
+    save_profile(profile)
+    apply_profile(profile)
+
+    # A device/precision change only takes effect for models loaded after it, so
+    # every detecting camera is reloaded (the registry reloads the weights).
+    reload_needed = any(key in {"fp16", "device"} for key in clean)
+    if reload_needed and manager.running:
+        for camera_id in list(manager.stream_ids()):
+            await manager.reload_camera(camera_id)
+
+    changed = {k: v for k, v in clean.items() if previous.get(k) != v}
+    logger.info("performance profile updated: %s", changed or clean)
+    return {
+        "ok": True,
+        "changed": changed,
+        "profile": asdict(profile),
+        "reloaded_cameras": reload_needed,
+        "detail": "تنظیمات عملکرد ذخیره و اعمال شد",
     }
 
 

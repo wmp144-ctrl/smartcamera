@@ -200,7 +200,9 @@ DEFAULT_MODEL_KEY = "rf-detr-base"
 #: Single-frame throughput measured on the reference machine (GTX 1650 4 GB,
 #: 1080p source): nano 39 ms, small 65 ms, base 106 ms per frame. The numbers
 #: only decide whether a configuration is plausible and which model a new
-#: camera gets; a faster GPU simply has more headroom than the table claims.
+#: camera gets. They are scaled by :data:`_SPEED_FACTOR`, which
+#: :func:`note_measured_latency` sets from the GPU actually installed, so an
+#: RTX card is not budgeted like a GTX 1650.
 MEASURED_FPS: dict[str, float] = {
     "rf-detr-large": 5.0,
     "rf-detr-medium": 7.0,
@@ -222,9 +224,45 @@ _BY_COST: tuple[str, ...] = (
 _HEADROOM = 1.15
 
 
+#: How much faster (or slower) this machine is than the reference GPU above.
+#: 1.0 until the detector measures a real frame.
+_SPEED_FACTOR = 1.0
+_SPEED_FACTOR_MIN = 0.25
+_SPEED_FACTOR_MAX = 8.0
+
+
+def speed_factor() -> float:
+    """Device speed relative to the reference GTX 1650 (1.0 = as measured)."""
+    return _SPEED_FACTOR
+
+
+def note_measured_latency(model_key: str, latency_ms: float) -> float:
+    """Scale the capacity table from one real measurement of this machine.
+
+    Called once after the detector loads: a card that runs the model twice as
+    fast as the table claims must also be recommended a heavier model for a
+    second camera. The ratio is clamped so a single strange sample (cold cache,
+    first traced call) can never collapse or explode the budget.
+    """
+    global _SPEED_FACTOR  # noqa: PLW0603 - process-wide GPU characteristic
+    baseline = MEASURED_FPS.get(model_key)
+    if not baseline or latency_ms <= 0:
+        return _SPEED_FACTOR
+    ratio = (1000.0 / float(latency_ms)) / baseline
+    _SPEED_FACTOR = min(_SPEED_FACTOR_MAX, max(_SPEED_FACTOR_MIN, ratio))
+    return _SPEED_FACTOR
+
+
+def reset_speed_factor() -> None:
+    """Forget the measurement (tests, or after switching the GPU)."""
+    global _SPEED_FACTOR  # noqa: PLW0603
+    _SPEED_FACTOR = 1.0
+
+
 def detection_capacity(model_key: str) -> float:
     """Approximate detections per second a single model instance can serve."""
-    return MEASURED_FPS.get(model_key, MEASURED_FPS[DEFAULT_MODEL_KEY])
+    baseline = MEASURED_FPS.get(model_key, MEASURED_FPS[DEFAULT_MODEL_KEY])
+    return round(baseline * _SPEED_FACTOR, 2)
 
 
 def suggest_model(camera_count: int, per_camera_fps: float) -> str:

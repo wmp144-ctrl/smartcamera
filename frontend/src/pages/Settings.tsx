@@ -28,8 +28,10 @@ import {
   useGPU,
   useInitDb,
   useModels,
+  usePerformance,
   useRunRetention,
   useRuntime,
+  useSavePerformance,
   useSaveSetting,
   useSettings,
   useStorage,
@@ -54,6 +56,9 @@ export function SettingsPage() {
   const saveSetting = useSaveSetting();
   const retention = useRunRetention();
   const initDb = useInitDb();
+  const performance = usePerformance();
+  const savePerformance = useSavePerformance();
+  const [perf, setPerf] = useState<Record<string, string>>({});
 
   const theme = useUI((state) => state.theme);
   const setTheme = useUI((state) => state.setTheme);
@@ -65,10 +70,22 @@ export function SettingsPage() {
   const setAutoRefresh = useUI((state) => state.setAutoRefresh);
   const overlayDefault = useUI((state) => state.overlayDefault);
   const setOverlayDefault = useUI((state) => state.setOverlayDefault);
+  const gridLiveFps = useUI((state) => state.gridLiveFps);
+  const setGridLiveFps = useUI((state) => state.setGridLiveFps);
 
   const [retentionDays, setRetentionDays] = useState(30);
   const [dryRun, setDryRun] = useState(true);
   const [editing, setEditing] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    const profile = performance.data?.profile;
+    if (!profile) return;
+    setPerf(
+      Object.fromEntries(
+        Object.entries(profile).map(([key, value]) => [key, String(value)]),
+      ),
+    );
+  }, [performance.data?.profile]);
 
   useEffect(() => {
     if (!settings.data) return;
@@ -512,6 +529,109 @@ export function SettingsPage() {
         </Card>
 
         <Card>
+          <CardHeader
+            title="عملکرد و منابع"
+            subtitle="روی این دستگاه ذخیره می‌شود و پس از ری‌استارت هم اعمال می‌شود"
+            icon={<Cpu />}
+          />
+          <CardBody className="space-y-3">
+            <div className="grid gap-x-6 md:grid-cols-2">
+              {Object.entries((performance.data?.hardware as Record<string, unknown>) ?? {}).map(
+                ([key, value]) => (
+                  <KeyValue key={key} label={key} value={<RawValue value={value} />} />
+                ),
+              )}
+              <KeyValue label="ضریب سرعت GPU" value={<RawValue value={performance.data?.speed_factor} />} />
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              {[
+                ["stream_fps", "نرخ دریافت (fps)"],
+                ["detection_fps", "نرخ تشخیص (fps)"],
+                ["detection_max_width", "عرض ورودی مدل (0 = بدون تغییر)"],
+                ["inference_queue_size", "ظرفیت صف استنتاج هر دوربین"],
+                ["snapshot_workers", "Worker نوشتن تصاویر"],
+                ["snapshot_queue_size", "ظرفیت صف تصاویر"],
+                ["persist_batch_max", "نتایج در هر تراکنش"],
+              ].map(([key, label]) => (
+                <Field key={key} label={label}>
+                  <Input
+                    className="num"
+                    type="number"
+                    value={perf[key] ?? ""}
+                    onChange={(event) => setPerf((current) => ({ ...current, [key]: event.target.value }))}
+                  />
+                </Field>
+              ))}
+              <Field label="دقت محاسبه (FP16)">
+                <Select
+                  value={perf.fp16 ?? "auto"}
+                  onChange={(event) => setPerf((current) => ({ ...current, fp16: event.target.value }))}
+                >
+                  <option value="auto">خودکار (اندازه‌گیری در زمان بارگذاری)</option>
+                  <option value="on">همیشه FP16</option>
+                  <option value="off">همیشه FP32</option>
+                </Select>
+              </Field>
+              <Field label="پردازنده استنتاج">
+                <Select
+                  value={perf.device ?? "cuda"}
+                  onChange={(event) => setPerf((current) => ({ ...current, device: event.target.value }))}
+                >
+                  <option value="cuda">GPU (CUDA)</option>
+                  <option value="cpu">CPU</option>
+                </Select>
+              </Field>
+            </div>
+
+            <Field label={`نرخ نمایش کاشی‌های زنده: ${toFaDigits(gridLiveFps)} fps`}>
+              <Slider
+                min={2}
+                max={20}
+                step={1}
+                value={gridLiveFps}
+                onChange={(value) => setGridLiveFps(value)}
+              />
+            </Field>
+
+            <p className="text-[11px] text-muted">
+              Batch Size ثابت ۱ است: RF-DETR برای یک تصویر trace می‌شود و پردازش دسته‌ای نیاز به بازسازی
+              مدل دارد. تغییر GPU یا FP16 همهٔ دوربین‌های در حال تشخیص را دوباره بارگذاری می‌کند.
+            </p>
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                loading={savePerformance.isPending}
+                onClick={() => {
+                  const payload: Record<string, unknown> = {};
+                  for (const [key, value] of Object.entries(perf)) {
+                    payload[key] = ["fp16", "device"].includes(key) ? value : Number(value);
+                  }
+                  for (const key of ["device"]) if (perf[key]) payload[key] = perf[key];
+                  savePerformance.mutate(payload, {
+                    onSuccess: () => toast.success("تنظیمات عملکرد اعمال شد"),
+                    onError: (error) => toast.error(error instanceof Error ? error.message : "ذخیره ناموفق"),
+                  });
+                }}
+              >
+                <Save />
+                ذخیره و اعمال
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                loading={performance.isFetching}
+                onClick={() => void performance.refetch()}
+              >
+                <RefreshCw />
+                بازخوانی
+              </Button>
+            </div>
+          </CardBody>
+        </Card>
+
+        <Card className="xl:col-span-2">
           <CardHeader title="تلمتری درون‌پردازه‌ای" subtitle="وضعیت لحظه‌ای مدیر دوربین‌ها" icon={<Activity />} />
           <CardBody className="space-y-3">
             {runtime.isLoading ? (
