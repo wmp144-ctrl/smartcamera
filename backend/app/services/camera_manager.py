@@ -377,12 +377,15 @@ class CameraManager:
             if camera is None:
                 self.remove_camera(camera_id)
                 return
-            # Load the model on a worker thread first: a cold load (weights
-            # download) would otherwise freeze the API for its whole duration.
             preload = self.detector_preload_args(camera)
-            if preload is not None:
-                await asyncio.to_thread(self.preload_detector, **preload)
-            self.apply_camera(camera)
+        # Load the model on a worker thread, but only after the session is closed:
+        # a cold RF-DETR load can take tens of seconds, and holding a pooled
+        # connection for it timed every other request out (QueuePool exhaustion)
+        # exactly when an operator saved a camera. The instance stays usable
+        # because ``expire_on_commit`` is off and the zones were eager-loaded.
+        if preload is not None:
+            await asyncio.to_thread(self.preload_detector, **preload)
+        self.apply_camera(camera)
 
     # -- live accessors ----------------------------------------------------
     def states(self) -> dict[int, str]:

@@ -349,19 +349,27 @@ async def camera_health(
 # live view
 # --------------------------------------------------------------------------
 @router.get("/{camera_id}/snapshot")
-async def camera_snapshot(camera: CameraDep, overlay: bool = False) -> Response:
+async def camera_snapshot(
+    camera: CameraDep, session: SessionDep, overlay: bool = False
+) -> Response:
+    camera_id = camera.id
+    # A ``yield`` dependency is only torn down once the response has been sent,
+    # so the session would stay checked out of the pool while the worker thread
+    # encodes the JPEG. Close it first: the pool is tiny and a handful of
+    # concurrent snapshots/streams must not starve camera writes.
+    await session.close()
     # ``encode_if_missing`` keeps the snapshot button working even when no live
     # view is open (idle cameras do not encode frames in the background). The
     # encoding runs in a worker thread so it cannot stall the event loop.
     frame = await asyncio.to_thread(
-        manager.latest_jpeg, camera.id, overlay=overlay, encode_if_missing=True
+        manager.latest_jpeg, camera_id, overlay=overlay, encode_if_missing=True
     )
     if frame is None:
         raise HTTPException(status_code=404, detail="تصویری از دوربین در دسترس نیست")
     return Response(
         content=frame,
         media_type="image/jpeg",
-        headers={"Cache-Control": "no-store", "X-Camera-Id": str(camera.id)},
+        headers={"Cache-Control": "no-store", "X-Camera-Id": str(camera_id)},
     )
 
 
@@ -402,12 +410,21 @@ async def _mjpeg_stream(camera_id: int, overlay: bool, fps: int) -> AsyncIterato
 @router.get("/{camera_id}/live")
 async def camera_live(
     camera: CameraDep,
+    session: SessionDep,
     overlay: bool = False,
     fps: Annotated[int, Query(ge=1, le=60)] = 20,
 ) -> StreamingResponse:
     """MJPEG live view. ``overlay=true`` draws detected objects on the frame."""
+    camera_id = camera.id
+    # This is the one request that outlives its handler by minutes. FastAPI
+    # closes a ``yield`` dependency only when the stream ends, so the session
+    # used to pin one pooled SQLite connection per open live view; with two
+    # cameras on screen the pool (2 + 2 overflow) was exhausted and saving a
+    # camera failed with "QueuePool limit ... connection timed out". The stream
+    # itself never queries the database, so release the connection now.
+    await session.close()
     return StreamingResponse(
-        _mjpeg_stream(camera.id, overlay, min(fps, settings.live_max_fps)),
+        _mjpeg_stream(camera_id, overlay, min(fps, settings.live_max_fps)),
         media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )

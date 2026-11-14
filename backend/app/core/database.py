@@ -33,7 +33,11 @@ if settings.resolved_database_url.startswith("sqlite"):
         # remove that; the pool is per-process and the app runs one event loop.
         _engine_kwargs["poolclass"] = AsyncAdaptedQueuePool
         _engine_kwargs["pool_size"] = settings.database_pool_size
-        _engine_kwargs["max_overflow"] = 2
+        # Overflow must cover a dashboard burst (status, events, stats and
+        # objects are polled together) on top of the background persister. Two
+        # extra connections were not enough: one slow request (a model preload)
+        # made every other one wait the full ``pool_timeout``.
+        _engine_kwargs["max_overflow"] = max(6, settings.database_pool_size)
         _engine_kwargs["pool_timeout"] = 30
     else:
         # NullPool keeps every connection fresh: it avoids cross-event-loop
@@ -97,13 +101,20 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
-    """FastAPI dependency."""
+    """FastAPI dependency.
+
+    Long responses (the MJPEG live view) must close the session themselves: this
+    teardown runs only after the response finished, which would keep a pooled
+    connection checked out for the whole stream.
+    """
     async with async_session_factory() as session:
         try:
             yield session
         except Exception:
             await session.rollback()
             raise
+        finally:
+            await session.close()
 
 
 # --------------------------------------------------------------------------
