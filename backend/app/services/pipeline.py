@@ -23,6 +23,7 @@ from app.core.config import settings
 from app.core.timeutil import to_local, utcnow
 from app.services.alerts import AlertDecision, AlertEngine, AlertRule
 from app.services.detector import Detector, filter_detections
+from app.services.imaging import fit_width
 from app.services.geometry import (
     box_center,
     box_center_in_polygon,
@@ -358,11 +359,13 @@ class DetectionPipeline:
         requires (a read-only view makes it warn on every frame).
         """
         limit = self.config.detection_max_width
-        height, width = array.shape[:2]
-        if limit and width > limit:
-            step = max(2, -(-width // limit))
-            array = np.ascontiguousarray(array[::step, ::step])
-        elif not array.flags.writeable:
+        if limit:
+            # ``fit_width`` resizes to exactly the configured width; the stride
+            # used here before turned 1920 px into 960 px for a 1280 limit, so
+            # the detector saw a fourth of the pixels it was asked for (and the
+            # model's internal resize then had less detail to work with).
+            array = fit_width(array, limit)
+        if not array.flags.writeable:
             array = np.ascontiguousarray(array)
         return array
 

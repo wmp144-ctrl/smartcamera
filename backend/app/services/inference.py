@@ -90,6 +90,9 @@ class InferenceScheduler:
         self._removed: set[int] = set()
         self._ready: deque[int] = deque()
         self._lock = threading.Lock()
+        #: Signalled when the dispatcher finishes a job, so ``wait_camera_idle``
+        #: can block without holding the scheduler lock (see its docstring).
+        self._idle = threading.Condition()
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -202,7 +205,29 @@ class InferenceScheduler:
             )
             self._thread.start()
 
-    def _next_job(self) -> tuple[int, float, Job] | None:
+    def wait_camera_idle(self, camera_id: int, timeout: float = 5.0) -> bool:
+        """Block until no job of *camera_id* is executing. True = idle.
+
+        A camera that is stopped (or deleted) must not have its pipeline
+        released while the shared thread is still inside ``pipeline.process``:
+        the release drops the last reference to the model and closes it under
+        the running call, which surfaced as random detection errors right after
+        an operator pressed Save or Delete. The scheduler lock is *not* held
+        while waiting, so other cameras keep running normally.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._idle:
+            while True:
+                with self._lock:
+                    busy = self._current == camera_id
+                if not busy:
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._idle.wait(min(remaining, 0.2))
+
+    def _next_job(self) -> tuple[int, float, Job, CameraStats] | None:
         with self._lock:
             while self._ready:
                 camera_id = self._ready.popleft()
@@ -210,6 +235,11 @@ class InferenceScheduler:
                 if slot is None or not slot.frames:
                     continue
                 queued_at, job = slot.frames.popleft()
+                # Fetched under the same lock: a ``setdefault`` in the
+                # dispatcher used to re-create the stats of a camera that
+                # ``unregister`` had just removed, leaving a ghost camera in
+                # /api/system/runtime until the next restart.
+                stats = self._stats.setdefault(camera_id, CameraStats())
                 # A camera that still has frames waiting goes to the *back* of
                 # the queue (round-robin). Without this re-arm, the second frame
                 # of a camera that submitted while it was running would never be
@@ -217,7 +247,7 @@ class InferenceScheduler:
                 # in the ready list.
                 if slot.frames:
                     self._ready.append(camera_id)
-                return camera_id, queued_at, job
+                return camera_id, queued_at, job, stats
             return None
 
     def _run(self) -> None:
@@ -226,31 +256,35 @@ class InferenceScheduler:
             self._wake.clear()
             job = self._next_job()
             while job is not None and not self._stop.is_set():
-                camera_id, queued_at, fn = job
-                stats = self._stats.setdefault(camera_id, CameraStats())
+                camera_id, queued_at, fn, stats = job
                 wait_ms = (time.monotonic() - queued_at) * 1000.0
-                self._last_wait_ms = wait_ms
-                stats.last_wait_ms = wait_ms
-                stats.max_wait_ms = max(stats.max_wait_ms, wait_ms)
-                self._current = camera_id
+                with self._lock:
+                    self._last_wait_ms = wait_ms
+                    stats.last_wait_ms = wait_ms
+                    stats.max_wait_ms = max(stats.max_wait_ms, wait_ms)
+                    self._current = camera_id
                 started = time.perf_counter()
                 try:
                     fn()
                 except Exception:  # noqa: BLE001 - one camera must not stop the rest
-                    stats.errors += 1
+                    with self._lock:
+                        stats.errors += 1
                     logger.exception("inference job failed for camera %s", camera_id)
                 finally:
                     elapsed = (time.perf_counter() - started) * 1000.0
-                    self._current = None
-                    self._last_job_ms = elapsed
-                    stats.last_inference_ms = elapsed
-                    stats.avg_inference_ms = (
-                        elapsed
-                        if stats.avg_inference_ms <= 0
-                        else 0.8 * stats.avg_inference_ms + 0.2 * elapsed
-                    )
-                    stats.processed += 1
-                    self._rounds += 1
+                    with self._lock:
+                        self._current = None
+                        self._last_job_ms = elapsed
+                        stats.last_inference_ms = elapsed
+                        stats.avg_inference_ms = (
+                            elapsed
+                            if stats.avg_inference_ms <= 0
+                            else 0.8 * stats.avg_inference_ms + 0.2 * elapsed
+                        )
+                        stats.processed += 1
+                        self._rounds += 1
+                    with self._idle:
+                        self._idle.notify_all()
                 job = self._next_job()
 
     # -- introspection -----------------------------------------------------

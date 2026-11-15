@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import shutil
 import subprocess
@@ -28,6 +27,7 @@ from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.services.annotate import OverlayBox, OverlayZone, draw_overlay
 from app.services.geometry import box_center
+from app.services.imaging import fit_width
 from app.services.inference import scheduler
 from app.services.persistence import snapshot_writer
 from app.services.pipeline import DetectionPipeline, PipelineConfig, ZoneSpec
@@ -50,6 +50,15 @@ LIVE_IDLE_GRACE_SECONDS = 3.0
 #: How long ``start()`` waits for a decode thread a previous ``stop()`` could not
 #: finish joining (a reader blocked in a socket read returns after its timeout).
 ORPHAN_JOIN_TIMEOUT_SECONDS = 10.0
+
+#: How long ``stop()`` waits for an inference job already inside the pipeline.
+#: The job is a few hundred milliseconds at worst; the bound only exists so a
+#: wedged model cannot block a camera restart forever.
+INFERENCE_DRAIN_TIMEOUT_SECONDS = 5.0
+
+#: Window used to average the detection rate. Longer than the stream window
+#: because a camera can legitimately detect only a few frames per minute.
+DETECT_RATE_WINDOW_SECONDS = 15.0
 
 
 @dataclass(slots=True)
@@ -609,6 +618,68 @@ class CameraRuntimeConfig:
         )
 
 
+class LiveEncoder:
+    """One background thread per camera that encodes the live-view JPEG.
+
+    Encoding used to run inline in the RTSP decode thread (~9 ms for a 1080p
+    frame, measured). At 20 fps that is nearly a fifth of the loop spent in
+    JPEG, so the next ``read()`` was late, the frame pipe filled and the camera
+    looked like it was stuttering. The decoder now hands the newest frame over
+    and keeps reading; a slow encoder simply drops the frame it has not started
+    (the pending slot holds exactly one), so memory stays bounded.
+    """
+
+    def __init__(self, encode, sink) -> None:  # noqa: ANN001 - callables
+        self._encode = encode
+        self._sink = sink
+        self._lock = threading.Lock()
+        self._pending: np.ndarray | None = None
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def submit(self, frame: np.ndarray) -> None:
+        with self._lock:
+            self._pending = frame
+        self._ensure_thread()
+        self._wake.set()
+
+    def _ensure_thread(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run, name="live-encoder", daemon=True
+            )
+            self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._wake.wait(0.5)
+            self._wake.clear()
+            with self._lock:
+                frame = self._pending
+                self._pending = None
+            if frame is None:
+                continue
+            encoded = self._encode(frame)
+            if encoded is not None:
+                self._sink(encoded)
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        self._wake.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+        with self._lock:
+            self._pending = None
+
+
 class CameraStream:
     """Owns one camera's decode loop and (optionally) its detection pipeline."""
 
@@ -645,6 +716,13 @@ class CameraStream:
         self._last_jpeg: bytes | None = None
         #: ``time.monotonic()`` of the last encoded live JPEG (0 = none yet)
         self._last_jpeg_at = 0.0
+        #: cadence gate for the encoder thread (last frame *handed over*),
+        #: separate from ``_last_jpeg_at`` so a drop cannot stretch the cadence
+        self._next_live_at = 0.0
+        #: JPEG encoding happens off the decode thread (see ``LiveEncoder``).
+        #: The lambda resolves ``_encode_live`` on every frame so a subclass or
+        #: a test can replace it without rebuilding the stream.
+        self._encoder = LiveEncoder(lambda frame: self._encode_live(frame), self._store_live_jpeg)
         self._overlay_cache: tuple[bytes, float] | None = None
         self._detections: list[OverlayBox] = []
         self._last_detect_at = 0.0
@@ -720,10 +798,22 @@ class CameraStream:
                 logger.warning(
                     "camera %s: decode thread has not finished stopping yet", self.config.id
                 )
-        # Hand the camera's slot back: queued frames are dropped instead of run,
-        # so a stopped camera cannot keep the GPU busy or deliver results into a
-        # pipeline that is about to be released.
+        # Hand the camera's slot back first: queued frames are dropped instead of
+        # run, so a stopped camera cannot start new work.
         scheduler.unregister(self.config.id)
+        # ...then wait for the job that is *already* inside the pipeline. Without
+        # this the caller released the detector right after stop(), and the shared
+        # model was closed underneath the running ``pipeline.process`` — which is
+        # how a Save or Delete produced a burst of detection errors.
+        if self.pipeline is not None and not scheduler.wait_camera_idle(
+            self.config.id, INFERENCE_DRAIN_TIMEOUT_SECONDS
+        ):
+            logger.warning(
+                "camera %s: inference still running after %.0fs; releasing anyway",
+                self.config.id,
+                INFERENCE_DRAIN_TIMEOUT_SECONDS,
+            )
+        self._encoder.stop()
 
     def _join_orphans(self, timeout: float | None = None) -> bool:
         """Wait for threads left over by an earlier ``stop()``. True = no orphans."""
@@ -1067,21 +1157,26 @@ class CameraStream:
         # so encoding 20 of them per second for a 5 fps tile is pure waste.
         now = time.monotonic()
         watching = (now - self._live_plain_at) < LIVE_IDLE_GRACE_SECONDS
-        encoded = None
-        if watching:
-            fps = self._live_fps or float(settings.live_max_fps or self.config.fps)
-            interval = 1.0 / max(1.0, fps)
-            if (now - self._last_jpeg_at) >= interval:
-                encoded = self._encode_live(frame)
         with self._lock:
             self._last_frame = frame
-            if encoded is not None:
-                # A frame that was not encoded must not clear the cache: the
-                # MJPEG loop still needs the newest JPEG between two encodes.
-                self._last_jpeg = encoded
-                self._last_jpeg_at = now
-                self._overlay_cache = None
-                self.health.live_encoded += 1
+        if not watching:
+            return
+        fps = self._live_fps or float(settings.live_max_fps or self.config.fps)
+        interval = 1.0 / max(1.0, fps)
+        if now < self._next_live_at:
+            return
+        self._next_live_at = now + interval
+        # The encode itself runs on the camera's encoder thread, never here: the
+        # decode thread must get back to ``reader.read()`` immediately.
+        self._encoder.submit(frame)
+
+    def _store_live_jpeg(self, encoded: bytes) -> None:
+        """Publish an encoded live JPEG (called from the encoder thread)."""
+        with self._lock:
+            self._last_jpeg = encoded
+            self._last_jpeg_at = time.monotonic()
+            self._overlay_cache = None
+            self.health.live_encoded += 1
 
     def _should_detect(self, now: float) -> bool:
         if not self.config.detection_enabled or self.pipeline is None:
@@ -1123,7 +1218,11 @@ class CameraStream:
         # Measure the detection rate when the frame was *analysed*, not when it
         # was submitted: with a busy scheduler the queued timestamps arrive out
         # of order and ``_rate`` then reported 0 fps for a working camera.
-        self._record_rate(self._detect_window, time.perf_counter())
+        # A 15 s window (not the 5 s used for the stream) keeps the number
+        # meaningful when the GPU can only analyse ~0.2 fps per camera: in a 5 s
+        # window that is a single sample, and ``_rate`` then printed 0.0 fps for
+        # a camera whose detection was working perfectly (measured on 8 cameras).
+        self._record_rate(self._detect_window, time.perf_counter(), span=DETECT_RATE_WINDOW_SECONDS)
         self.health.detection_fps = _rate(self._detect_window)
 
         boxes: list[OverlayBox] = []
@@ -1182,9 +1281,9 @@ class CameraStream:
                 logger.exception("result callback failed for camera %s", self.config.id)
 
     @staticmethod
-    def _record_rate(window: list[float], now: float) -> None:
+    def _record_rate(window: list[float], now: float, span: float = 5.0) -> None:
         window.append(now)
-        cutoff = now - 5.0
+        cutoff = now - span
         while window and window[0] < cutoff:
             window.pop(0)
 
@@ -1199,19 +1298,13 @@ def _rate(window: list[float]) -> float:
 
 
 def _downscale(frame: np.ndarray, max_width: int) -> np.ndarray:
-    """Stride-subsample a frame so the live view is never wider than ``max_width``.
+    """Fit a frame into ``max_width`` px, keeping the aspect ratio.
 
-    The stride is rounded **up**: with a truncating division a 1920px camera
-    with the default 1280 limit produced a stride of 1, i.e. no downscale at
-    all, and every live frame was encoded at 1080p.
+    Stride-subsampling (``frame[::step, ::step]``) turned a 1920 px camera into
+    960 px for a 1280 limit and aliased thin structures away; ``fit_width``
+    resizes to the requested width with area averaging instead.
     """
-    if max_width <= 0:
-        return frame
-    height, width = frame.shape[:2]
-    if width <= max_width:
-        return frame
-    step = max(2, math.ceil(width / max_width))
-    return frame[::step, ::step]
+    return fit_width(frame, max_width)
 
 
 def _encode(image, quality: int) -> bytes:

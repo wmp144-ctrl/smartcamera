@@ -110,7 +110,11 @@ class RFDetrDetector:
         self.spec = spec or get_model_spec(model_key)
         self.model_key = self.spec.key
         self.weights_path = Path(weights_path) if weights_path else self._installed_weights()
+        #: Requested device; resolved against the machine in ``_effective_device``
+        #: (``cuda`` on a box without a GPU used to fail the whole model load
+        #: instead of running on the CPU).
         self.device = device
+        self._device_resolved = False
         self.name = f"rfdetr:{self.model_key}"
         self._model: Any = None
         self._lock = threading.RLock()
@@ -190,10 +194,25 @@ class RFDetrDetector:
 
         if self.weights_path and Path(self.weights_path).exists():
             kwargs["pretrain_weights"] = str(self.weights_path)
-        if self.device:
-            kwargs["device"] = self.device
+        device = self._effective_device()
+        if device:
+            kwargs["device"] = device
         model = cls(**kwargs)
         return model
+
+    def _effective_device(self) -> str:
+        """The device this process can actually use.
+
+        ``settings.device`` defaults to ``cuda``; on a machine without a working
+        CUDA runtime that value went straight into ``RFDETRBase(device=...)`` and
+        the load failed, so detection was silently unavailable on every CPU-only
+        install. Resolving it once turns that into CPU inference with one
+        warning.
+        """
+        if not self._device_resolved:
+            self.device = resolve_device(self.device)
+            self._device_resolved = True
+        return self.device
 
     # -- optimisation ------------------------------------------------------
     def _configure_torch(self) -> None:
@@ -210,7 +229,7 @@ class RFDetrDetector:
             import torch  # noqa: PLC0415
         except Exception:  # noqa: BLE001 - torch is optional
             return
-        if self.device and str(self.device).startswith("cuda"):
+        if str(self._effective_device()).startswith("cuda"):
             return
         cores = os.cpu_count() or 2
         usable = max(1, cores - max(0, int(settings.cpu_reserve_cores)))
@@ -359,6 +378,37 @@ class RFDetrDetector:
             return model.predict(frame, threshold=FLOOR_THRESHOLD)
         except TypeError:
             return model.predict(frame)
+
+
+def resolve_device(requested: str | None) -> str:
+    """Pick a device this process can really run on.
+
+    ``requested`` may be ``None``/empty (auto), ``cpu``, ``cuda`` or
+    ``cuda:<n>``. A CUDA request without a usable GPU resolves to ``cpu`` with a
+    single warning instead of letting the model load fail.
+    """
+    text = (requested or "").strip().lower() or "auto"
+    try:
+        import torch  # noqa: PLC0415 - optional heavy dependency
+    except Exception:  # noqa: BLE001 - no AI stack at all
+        if text.startswith("cuda"):
+            logger.warning("CUDA requested but torch is not installed; using CPU")
+        return "cpu"
+    available = False
+    try:
+        available = bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001 - a broken driver must not break startup
+        available = False
+    if text == "auto":
+        return "cuda" if available else "cpu"
+    if text.startswith("cuda") and not available:
+        logger.warning(
+            "device=%s requested but CUDA is unavailable on this machine; "
+            "running inference on the CPU",
+            requested,
+        )
+        return "cpu"
+    return text
 
 
 def wants_half_precision(

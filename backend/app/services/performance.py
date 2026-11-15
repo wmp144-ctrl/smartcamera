@@ -80,6 +80,8 @@ def default_profile() -> PerformanceProfile:
     gets FP16 automatically (the detector re-checks that from the GPU).
     """
     cores = os.cpu_count() or 4
+    from app.services.detector import resolve_device  # noqa: PLC0415 - avoid a cycle
+
     profile = PerformanceProfile(
         stream_fps=settings.default_stream_fps,
         detection_fps=settings.default_detection_fps,
@@ -89,7 +91,9 @@ def default_profile() -> PerformanceProfile:
         snapshot_queue_size=settings.snapshot_queue_size,
         persist_batch_max=settings.persist_batch_max,
         fp16=settings.fp16,
-        device=settings.device,
+        # A machine without a GPU must not be told it has one: the Settings page
+        # showed "cuda" on CPU-only installs.
+        device=resolve_device(settings.device),
     )
     try:  # a GPU changes how much work per frame is affordable
         import torch  # noqa: PLC0415
@@ -118,13 +122,15 @@ def load_profile() -> PerformanceProfile:
         return profile
     if not isinstance(raw, dict):
         return profile
-    for key, value in raw.items():
-        if key not in EDITABLE_FIELDS:
-            continue
-        try:
-            setattr(profile, key, type(getattr(profile, key))(value))
-        except (TypeError, ValueError):
-            logger.warning("ignoring invalid performance value %s=%r", key, value)
+    # The file is editable by hand and survives upgrades, so it is validated on
+    # the way in exactly like an API update: a saved ``stream_fps: 999`` or
+    # ``device: "gpu"`` used to be applied verbatim and produced a broken or
+    # unusable configuration after a restart.
+    clean, errors = validate(raw)
+    for message in errors:
+        logger.warning("ignoring saved performance value: %s", message)
+    for key, value in clean.items():
+        setattr(profile, key, value)
     return profile
 
 

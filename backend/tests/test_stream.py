@@ -598,8 +598,8 @@ def test_downscale_caps_the_live_frame_width() -> None:
 
     wide = np.zeros((1080, 1920, 3), dtype=np.uint8)
     scaled = _downscale(wide, 1280)
-    assert scaled.shape[1] <= 1280
-    assert scaled.shape[1] == 960
+    assert scaled.shape[1] == 1280
+    assert scaled.shape[0] == 720  # aspect ratio kept
 
     small = np.zeros((720, 640, 3), dtype=np.uint8)
     assert _downscale(small, 1280).shape == small.shape
@@ -753,8 +753,10 @@ def test_live_jpeg_is_encoded_at_the_viewer_rate() -> None:
     stream.mark_live_view(fps=1)
 
     stream._publish_frame(frame(10))
+    # Encoding happens on the camera's encoder thread now, so the cache appears
+    # a moment after the frame is published rather than inside ``read()``.
+    assert wait_for(lambda: stream.latest_jpeg(encode_if_missing=False) is not None)
     first = stream.latest_jpeg(encode_if_missing=False)
-    assert first is not None
 
     # A second frame inside the 1 fps window must not be encoded again.
     stream._publish_frame(frame(250))
@@ -765,7 +767,7 @@ def test_a_stale_live_jpeg_is_not_served_as_live() -> None:
     stream = CameraStream(make_config(), reader_factory=lambda _cfg: FakeReader())
     stream.mark_live_view(fps=20)
     stream._publish_frame(frame(10))
-    assert stream.latest_jpeg(encode_if_missing=False) is not None
+    assert wait_for(lambda: stream.latest_jpeg(encode_if_missing=False) is not None)
 
     # Pretend the decoder stopped ten seconds ago: the MJPEG loop must see
     # "no frame" (and draw the no-signal placeholder) instead of replaying it.
