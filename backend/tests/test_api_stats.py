@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import date
 
 from app.core.timeutil import utcnow
 from app.services.heatmap import HeatmapBuffer, flush_buffer

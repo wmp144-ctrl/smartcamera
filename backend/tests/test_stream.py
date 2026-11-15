@@ -203,7 +203,8 @@ def test_stream_reconnects_after_decode_failures() -> None:
     stream.start()
     try:
         assert wait_for(lambda: len(readers) >= 2, timeout=5.0)
-        assert wait_for(lambda: stream.health.reconnect_count >= 2)
+        # The first session is not a reconnect: after one drop the counter is 1.
+        assert wait_for(lambda: stream.health.reconnect_count >= 1)
         assert wait_for(lambda: stream.health.dropped_frames > 0)
     finally:
         stream.stop()
@@ -707,3 +708,87 @@ def test_session_without_frames_backs_off_instead_of_looping() -> None:
     # Without the backoff this was one reconnect per ~1 s (hundreds after a
     # five minute outage); with it, two seconds allow only a handful.
     assert 2 <= len(readers) <= 8, f"{len(readers)} reconnects in two seconds"
+
+
+def test_first_connection_is_not_counted_as_a_reconnect() -> None:
+    reader = FakeReader()
+    stream = CameraStream(make_config(), reader_factory=lambda _cfg: reader)
+    stream.start()
+    try:
+        assert wait_for(lambda: stream.health.state == "online")
+        assert stream.health.reconnect_count == 0
+        assert stream.health.connect_failures == 0
+    finally:
+        stream.stop()
+
+
+def test_failed_connection_attempts_are_not_dropped_frames() -> None:
+    attempts: list[FakeReader] = []
+
+    def factory(_cfg):
+        reader = FakeReader(fail_open=True) if len(attempts) < 2 else FakeReader()
+        attempts.append(reader)
+        return reader
+
+    stream = CameraStream(
+        make_config(
+            reconnect_policy={"backoff_initial": 0.02, "backoff_max": 0.02, "backoff_factor": 1.0}
+        ),
+        reader_factory=factory,
+    )
+    stream.start()
+    try:
+        assert wait_for(lambda: stream.health.state == "online", timeout=5.0)
+        assert stream.health.connect_failures >= 2
+        # A camera that could not be reached is a connection problem, not a
+        # decode problem: the health chart must not call it a dropped frame.
+        assert stream.health.dropped_frames == 0
+        assert stream.health.reconnect_count == 0
+    finally:
+        stream.stop()
+
+
+def test_live_jpeg_is_encoded_at_the_viewer_rate() -> None:
+    stream = CameraStream(make_config(fps=20), reader_factory=lambda _cfg: FakeReader())
+    stream.mark_live_view(fps=1)
+
+    stream._publish_frame(frame(10))
+    first = stream.latest_jpeg(encode_if_missing=False)
+    assert first is not None
+
+    # A second frame inside the 1 fps window must not be encoded again.
+    stream._publish_frame(frame(250))
+    assert stream.latest_jpeg(encode_if_missing=False) == first
+
+
+def test_a_stale_live_jpeg_is_not_served_as_live() -> None:
+    stream = CameraStream(make_config(), reader_factory=lambda _cfg: FakeReader())
+    stream.mark_live_view(fps=20)
+    stream._publish_frame(frame(10))
+    assert stream.latest_jpeg(encode_if_missing=False) is not None
+
+    # Pretend the decoder stopped ten seconds ago: the MJPEG loop must see
+    # "no frame" (and draw the no-signal placeholder) instead of replaying it.
+    stream._last_jpeg_at -= 10.0
+    assert stream.latest_jpeg(encode_if_missing=False) is None
+
+
+def test_rebuilding_a_pipeline_does_not_leak_model_references(monkeypatch) -> None:
+    """Every settings save used to add one reference to the shared model."""
+    from app.services import detector as detector_module
+    from app.services.detector import registry
+    from app.services.stream import _rebuild_pipeline
+
+    monkeypatch.setattr(detector_module.RFDetrDetector, "load", lambda self: True)
+    monkeypatch.setattr(detector_module.RFDetrDetector, "_optimize", lambda self, _model: None)
+    registry.clear()
+    try:
+        config = make_config(detection_enabled=True)
+        stream = CameraStream(config, reader_factory=lambda _cfg: FakeReader())
+        for _ in range(3):
+            # ``CameraStream.reload`` assigns the returned pipeline, so the
+            # second and later calls are the ones that used to leak a reference.
+            stream.pipeline = _rebuild_pipeline(stream, config)
+        assert [item["refs"] for item in registry.loaded()] == [1]
+    finally:
+        registry.clear()

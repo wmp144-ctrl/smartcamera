@@ -12,7 +12,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, time
 
-from app.core.timeutil import to_local
 
 logger = logging.getLogger(__name__)
 

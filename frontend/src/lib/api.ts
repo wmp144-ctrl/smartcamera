@@ -482,6 +482,9 @@ export class ApiError extends Error {
 
 type QueryValue = string | number | boolean | null | undefined | (string | number)[];
 
+/** GET/POST timeout: long enough for a model preload, short enough to notice. */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 /** Anything we can serialise into a query string. */
 export type QueryParams = object;
 
@@ -509,10 +512,14 @@ async function request<T>(
   options: { params?: QueryParams; body?: unknown; signal?: AbortSignal } = {},
 ): Promise<T> {
   const url = `${path}${buildQuery(options.params)}`;
+  // A backend that stops answering must not leave a panel spinning forever: no
+  // caller passes a signal for plain GETs, so one is created here.
+  const controller = options.signal ? null : new AbortController();
+  const timeout = controller ? window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS) : null;
   const init: RequestInit = {
     method,
     headers: { Accept: "application/json" },
-    signal: options.signal,
+    signal: options.signal ?? controller?.signal,
     // The admin session lives in an HttpOnly cookie on this origin.
     credentials: "same-origin",
   };
@@ -525,8 +532,13 @@ async function request<T>(
   try {
     response = await fetch(url, init);
   } catch (error) {
-    if ((error as Error)?.name === "AbortError") throw error;
+    if ((error as Error)?.name === "AbortError") {
+      if (controller) throw new ApiError(0, "سرور در زمان مقرر پاسخ نداد");
+      throw error;
+    }
     throw new ApiError(0, "ارتباط با سرور برقرار نشد");
+  } finally {
+    if (timeout !== null) window.clearTimeout(timeout);
   }
 
   if (response.status === 204) return undefined as T;

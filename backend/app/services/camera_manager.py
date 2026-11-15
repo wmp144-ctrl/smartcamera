@@ -136,6 +136,9 @@ class CameraManager:
         self.heatmap = HeatmapBuffer()
         self._tasks: list[asyncio.Task] = []
         self._loop: asyncio.AbstractEventLoop | None = None
+        #: signalled from the decode threads when a result is queued, so the
+        #: consumer wakes up immediately instead of polling every 30 ms.
+        self._wake: asyncio.Event | None = None
         self._running = False
         self._last_health_write: dict[int, float] = {}
         # ``None`` = never pruned, so the first tick always prunes (a fresh boot
@@ -163,6 +166,7 @@ class CameraManager:
             return
         self._loop = asyncio.get_running_loop()
         bus.bind_loop(self._loop)
+        self._wake = asyncio.Event()
         self._running = True
         # Apply the saved performance profile (Settings page) before any camera
         # starts, so the first model load already uses the right device/FP16.
@@ -193,7 +197,14 @@ class CameraManager:
             _detach_detector(stream)
         self._streams.clear()
         scheduler.shutdown()
+        self._wake = None
         await self._flush_heatmap()
+        # Snapshots already encoded and waiting for the disk used to be dropped
+        # here (daemon threads), so a restart silently lost evidence.
+        try:
+            snapshot_writer().shutdown()
+        except Exception:  # noqa: BLE001 - shutdown must never raise
+            logger.exception("snapshot writer did not stop cleanly")
         logger.info("camera manager stopped")
 
     # -- synchronisation with the database --------------------------------
@@ -208,12 +219,22 @@ class CameraManager:
                 .scalars()
                 .all()
             )
-            for camera in cameras:
-                self.apply_camera(camera)
+            preloads = [
+                preload
+                for preload in (self.detector_preload_args(camera) for camera in cameras)
+                if preload is not None
+            ]
             known = {camera.id for camera in cameras}
-            for camera_id in list(self._streams):
-                if camera_id not in known:
-                    self.remove_camera(camera_id)
+        # A cold model load takes seconds and used to run inside the event loop
+        # during boot, freezing the API and the WebSocket feed. Load the weights
+        # on worker threads first; ``apply_camera`` then finds them cached.
+        for preload in preloads:
+            await asyncio.to_thread(self.preload_detector, **preload)
+        for camera in cameras:
+            self.apply_camera(camera)
+        for camera_id in list(self._streams):
+            if camera_id not in known:
+                self.remove_camera(camera_id)
 
     def apply_camera(self, camera: Camera) -> None:
         """Create, update or remove the stream for a camera (sync, no I/O)."""
@@ -505,14 +526,21 @@ class CameraManager:
             return stream.latest_overlay_jpeg()
         return stream.latest_jpeg(encode_if_missing=encode_if_missing)
 
-    def mark_live_view(self, camera_id: int) -> bool:
-        """Register a live-view client so the decoder keeps encoding JPEGs."""
+    def mark_live_view(self, camera_id: int, fps: float | None = None) -> bool:
+        """Register a live-view client so the decoder keeps encoding JPEGs.
+
+        ``fps`` is the rate that client consumes; the decoder encodes at that
+        cadence instead of the full stream rate.
+        """
         stream = self._streams.get(camera_id)
         if stream is None:
             return False
         mark = getattr(stream, "mark_live_view", None)
         if callable(mark):
-            mark()
+            try:
+                mark(fps)
+            except TypeError:  # test double with the old signature
+                mark()
         return True
 
     def stream_count(self) -> int:
@@ -560,6 +588,13 @@ class CameraManager:
                 self._queue.put_nowait(item)
             except queue.Full:  # pragma: no cover - extreme backpressure
                 pass
+        loop = self._loop
+        wake = self._wake
+        if loop is not None and wake is not None:
+            try:
+                loop.call_soon_threadsafe(wake.set)
+            except RuntimeError:  # loop closed during shutdown
+                pass
 
     def _on_state_change(
         self, config: CameraRuntimeConfig, state: str, message: str | None
@@ -580,7 +615,18 @@ class CameraManager:
             try:
                 first = self._queue.get_nowait()
             except queue.Empty:
-                await asyncio.sleep(0.03)
+                wake = self._wake
+                if wake is None:  # no loop-bound event (tests / shutdown)
+                    await asyncio.sleep(0.03)
+                    continue
+                # Sleep until a decode thread signals new work (or a slow
+                # heartbeat): polling every 30 ms woke the loop 33 times a
+                # second for nothing and added 30 ms of latency to every result.
+                try:
+                    await asyncio.wait_for(wake.wait(), 1.0)
+                except asyncio.TimeoutError:
+                    pass
+                wake.clear()
                 continue
 
             # Drain a few more results and write them together: every

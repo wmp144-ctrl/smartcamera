@@ -12,7 +12,6 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_session
 from app.core.timeutil import parse_dt
 from app.models.camera import Camera
-from app.services.camera_manager import manager
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 

@@ -452,3 +452,24 @@ def test_snapshot_writer_reports_errors_without_dying() -> None:
         assert "disk full" in (writer.stats()["last_error"] or "")
     finally:
         writer.shutdown()
+
+
+def test_snapshot_writer_regains_workers_after_shrink_and_grow() -> None:
+    """Lowering then raising the worker count must not silently halve the pool."""
+    from app.services.persistence import SnapshotWriter
+
+    writer = SnapshotWriter(workers=4, capacity=8)
+    try:
+        writer.resize(workers=2, capacity=8)
+        deadline = time.monotonic() + 3.0
+        while writer.stats()["workers"] > 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert writer.stats()["workers"] == 2
+
+        writer.resize(workers=4, capacity=8)
+        deadline = time.monotonic() + 3.0
+        while writer.stats()["workers"] < 4 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert writer.stats()["workers"] == 4
+    finally:
+        writer.shutdown()

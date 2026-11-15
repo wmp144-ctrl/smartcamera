@@ -72,9 +72,9 @@ class CameraStats:
 
 @dataclass
 class _Slot:
+    #: waiting frames, newest last; guarded by the scheduler lock (never a
+    #: per-slot lock: the dispatcher holds that lock for microseconds only)
     frames: deque[tuple[float, Job]] = field(default_factory=deque)
-    #: guards ``frames`` only; held for microseconds, never across a job
-    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class InferenceScheduler:
@@ -84,6 +84,10 @@ class InferenceScheduler:
         self._queue_size = max(1, int(queue_size))
         self._name = name
         self._slots: dict[int, _Slot] = {}
+        #: cameras that were unregistered: a decode thread that is still
+        #: finishing one frame must not resurrect their slot (a deleted camera
+        #: used to stay in the stats and in ``pending`` for the whole uptime).
+        self._removed: set[int] = set()
         self._ready: deque[int] = deque()
         self._lock = threading.Lock()
         self._wake = threading.Event()
@@ -121,6 +125,7 @@ class InferenceScheduler:
     # -- camera registration ----------------------------------------------
     def register(self, camera_id: int) -> None:
         with self._lock:
+            self._removed.discard(camera_id)
             self._slots.setdefault(camera_id, _Slot())
             self._stats.setdefault(camera_id, CameraStats())
 
@@ -136,6 +141,8 @@ class InferenceScheduler:
                 stats = self._stats.get(camera_id)
                 if stats is not None:
                     stats.dropped += len(slot.frames)
+            self._stats.pop(camera_id, None)
+            self._removed.add(camera_id)
             self._ready = deque(cid for cid in self._ready if cid != camera_id)
 
     # -- submission --------------------------------------------------------
@@ -146,8 +153,14 @@ class InferenceScheduler:
         frame was replaced: the caller can count that as a dropped detection
         (the newest frame is always the one that runs).
         """
+        if camera_id in self._removed:
+            # The camera was stopped/deleted: a frame already in flight must not
+            # start a new dispatch round for it.
+            return False
         self._ensure_thread()
         with self._lock:
+            if camera_id in self._removed:
+                return False
             slot = self._slots.get(camera_id)
             if slot is None:
                 slot = self._slots[camera_id] = _Slot()
@@ -242,16 +255,21 @@ class InferenceScheduler:
 
     # -- introspection -----------------------------------------------------
     def stats(self) -> dict[str, Any]:
+        # Everything below happens *inside* the lock: a camera registering or
+        # stopping while this endpoint was serialising used to raise
+        # "dictionary changed size during iteration" and return HTTP 500 from
+        # /api/system/runtime (which the dashboard polls every few seconds).
         with self._lock:
             cameras = {str(cid): stats.as_dict() for cid, stats in self._stats.items()}
             pending = sum(len(slot.frames) for slot in self._slots.values())
             current = self._current
-        total = CameraStats()
-        for item in self._stats.values():
-            total.submitted += item.submitted
-            total.processed += item.processed
-            total.dropped += item.dropped
-            total.errors += item.errors
+            rounds = self._rounds
+            total = CameraStats()
+            for item in self._stats.values():
+                total.submitted += item.submitted
+                total.processed += item.processed
+                total.dropped += item.dropped
+                total.errors += item.errors
         return {
             "running": bool(self._thread is not None and self._thread.is_alive()),
             "queue_size": self._queue_size,
@@ -263,7 +281,7 @@ class InferenceScheduler:
             "busy_camera": current,
             "inference_ms": round(self._last_job_ms, 1),
             "queue_wait_ms": round(self._last_wait_ms, 1),
-            "rounds": self._rounds,
+            "rounds": rounds,
             "uptime_seconds": (
                 round(time.monotonic() - self._started_at, 1) if self._started_at else 0.0
             ),
@@ -276,6 +294,7 @@ class InferenceScheduler:
             self._slots.clear()
             self._ready.clear()
             self._stats.clear()
+            self._removed.clear()
             self._rounds = 0
             self._last_job_ms = 0.0
             self._last_wait_ms = 0.0

@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence, runtime_checkable
 
@@ -37,6 +36,11 @@ logger = logging.getLogger(__name__)
 # Detections below this are dropped before per-camera filtering so the shared
 # model output stays small.
 FLOOR_THRESHOLD = 0.05
+
+#: How long a failed load is remembered before it is attempted again.
+# ``acquire()`` runs on whichever request touches the camera next; retrying a
+# broken model on every request froze the event loop for the whole load time.
+LOAD_RETRY_COOLDOWN = 60.0
 
 
 @runtime_checkable
@@ -112,6 +116,8 @@ class RFDetrDetector:
         self._lock = threading.RLock()
         self._load_error: str | None = None
         self._reported_error: str | None = None
+        #: ``time.monotonic()`` of the last failed load (see LOAD_RETRY_COOLDOWN)
+        self._failed_at = 0.0
         #: "fp16" / "fp32" — what the last optimisation actually used.
         self.precision = "fp32"
         #: Mean time of one ``predict`` call measured at load (0 = not measured).
@@ -146,12 +152,18 @@ class RFDetrDetector:
         with self._lock:
             if self._model is not None:
                 return True
+            if self._load_error and (time.monotonic() - self._failed_at) < LOAD_RETRY_COOLDOWN:
+                # A model that failed to load (missing weights, OOM, broken
+                # driver) stays failed for a minute instead of making the next
+                # request pay the full load again.
+                return False
             try:
                 self._configure_torch()
                 model = self._build_model()
                 self._optimize(model)
             except Exception as exc:  # noqa: BLE001 - report, never crash the API
                 self._load_error = f"{type(exc).__name__}: {exc}"
+                self._failed_at = time.monotonic()
                 # Warn once per distinct reason, not once per retry.
                 if self._load_error != self._reported_error:
                     self._reported_error = self._load_error

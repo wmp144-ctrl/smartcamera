@@ -76,8 +76,8 @@ def default_profile() -> PerformanceProfile:
 
     The numbers follow the CPU and the GPU that are actually installed, because
     the same app ships to a 4-core office PC and to a workstation with an RTX
-    card: half the cores, half the snapshot writers; two Tensor-core capable
-    cards get FP16 automatically (the detector measures and confirms it).
+    card: half the cores, half the snapshot writers; a Tensor-core capable card
+    gets FP16 automatically (the detector re-checks that from the GPU).
     """
     cores = os.cpu_count() or 4
     profile = PerformanceProfile(

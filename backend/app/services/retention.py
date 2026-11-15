@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.database import db_write_lock
 from app.core.timeutil import to_local, utcnow
 from app.models.detection import Event, ObjectImage, TrackRecord
 from app.models.system import Alert, HealthMetric, HeatmapCell
@@ -58,7 +59,27 @@ async def _count(session: AsyncSession, model, condition) -> int:
 async def apply_retention(
     session: AsyncSession, days: int | None = None, *, dry_run: bool = False
 ) -> RetentionReport:
+    """Purge old records and their files.
+
+    A real purge takes the same write lock as the background writers: SQLite
+    admits one writer, so without it a 500-row chunk loop could stall detection
+    persistence for the whole run (and every other writer would burn its
+    ``busy_timeout`` retries waiting).
+    """
+    if dry_run:
+        return await _apply_retention(session, days, dry_run=True)
+    async with db_write_lock():
+        return await _apply_retention(session, days, dry_run=False)
+
+
+async def _apply_retention(
+    session: AsyncSession, days: int | None = None, *, dry_run: bool = False
+) -> RetentionReport:
     days = int(days if days is not None else settings.retention_days)
+    #: Image files are removed only **after** the commit succeeds: deleting them
+    #: inline left rows pointing at missing evidence whenever the transaction
+    #: rolled back.
+    pending_files: list[str] = []
     cutoff = utcnow() - timedelta(days=max(1, days))
     report = RetentionReport(days=days, cutoff=cutoff.isoformat(), dry_run=dry_run)
 
@@ -75,9 +96,9 @@ async def apply_retention(
             if not images:
                 break
             for image in images:
-                for path in (image.full_path, image.crop_path, image.thumb_path):
-                    if delete_relative(path):
-                        report.files_deleted += 1
+                pending_files.extend(
+                    path for path in (image.full_path, image.crop_path, image.thumb_path) if path
+                )
                 await session.delete(image)
             await session.flush()
             report.images_deleted += len(images)
@@ -93,9 +114,11 @@ async def apply_retention(
             if not events:
                 break
             for event in events:
-                for path in (event.snapshot_full_path, event.snapshot_crop_path):
-                    if delete_relative(path):
-                        report.files_deleted += 1
+                pending_files.extend(
+                    path
+                    for path in (event.snapshot_full_path, event.snapshot_crop_path)
+                    if path
+                )
                 await session.delete(event)
             await session.flush()
             report.events_deleted += len(events)
@@ -133,5 +156,8 @@ async def apply_retention(
 
     if not dry_run:
         await session.commit()
+        for path in pending_files:
+            if delete_relative(path):
+                report.files_deleted += 1
     logger.info("retention finished: %s", report.as_dict())
     return report

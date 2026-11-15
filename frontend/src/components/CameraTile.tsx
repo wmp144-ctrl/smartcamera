@@ -35,18 +35,30 @@ export function CameraTile({
   // A tile that scrolled out of view (or a background tab) must not keep an
   // MJPEG connection open: the backend encodes and the browser decodes every
   // frame, which is pure CPU for pixels nobody sees.
-  const [visible, setVisible] = useState(true);
+  const [inView, setInView] = useState(true);
+  const [pageVisible, setPageVisible] = useState(true);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const node = containerRef.current;
     if (!node || typeof IntersectionObserver === "undefined") return;
     const observer = new IntersectionObserver(
-      (entries) => setVisible(entries.some((entry) => entry.isIntersecting)),
+      (entries) => setInView(entries.some((entry) => entry.isIntersecting)),
       { rootMargin: "160px" },
     );
     observer.observe(node);
     return () => observer.disconnect();
+  }, []);
+
+  // IntersectionObserver does not fire when the tab is hidden, so this is the
+  // only thing that stops a backgrounded dashboard from pulling MJPEG frames
+  // (and the backend from encoding them) for pixels nobody is looking at.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const update = () => setPageVisible(document.visibilityState !== "hidden");
+    update();
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
   }, []);
 
   // A dropped MJPEG connection is normal (camera restarted, backend busy);
@@ -84,7 +96,7 @@ export function CameraTile({
   return (
     <div ref={containerRef} className={cn("panel group overflow-hidden", className)}>
       <div className="relative aspect-video w-full overflow-hidden bg-[#050a14]">
-        {live && !failed && visible ? (
+        {live && !failed && inView && pageVisible ? (
           <img
             key={liveUrl}
             src={liveUrl}

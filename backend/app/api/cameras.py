@@ -20,7 +20,6 @@ from app.models.camera import Camera, Zone
 from app.models.system import HealthMetric
 from app.schemas.camera import (
     CameraCreate,
-    CameraRead,
     CameraStatus,
     CameraUpdate,
     CameraWithZones,
@@ -383,37 +382,44 @@ async def camera_snapshot(
     )
 
 
+def _mjpeg_part(payload: bytes) -> bytes:
+    return (
+        f"--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {len(payload)}\r\n\r\n".encode()
+        + payload
+        + b"\r\n"
+    )
+
+
 async def _mjpeg_stream(camera_id: int, overlay: bool, fps: int) -> AsyncIterator[bytes]:
     interval = 1.0 / max(1, min(fps, 60))
     last: bytes | None = None
     idle = 0
+    live_fps = min(fps, settings.live_max_fps)
     while True:
-        # Tell the decoder somebody is watching, then fetch the newest frame in
-        # a worker thread: drawing an overlay and encoding a JPEG inside the
-        # event loop would freeze every API request and the WebSocket feed.
-        manager.mark_live_view(camera_id)
-        frame = await asyncio.to_thread(
-            manager.latest_jpeg, camera_id, overlay=overlay, encode_if_missing=False
-        )
+        # Tell the decoder somebody is watching *and at which rate*: it encodes
+        # JPEGs at this cadence instead of the full stream rate.
+        manager.mark_live_view(camera_id, fps=live_fps)
+        if overlay:
+            # Drawing the boxes and encoding is real work; keep it off the loop.
+            frame = await asyncio.to_thread(
+                manager.latest_jpeg, camera_id, overlay=True, encode_if_missing=False
+            )
+        else:
+            # Plain read of the newest cache entry: hopping to a worker thread
+            # 20 times a second per viewer cost more than the read itself.
+            frame = manager.latest_jpeg(camera_id, overlay=False, encode_if_missing=False)
         if frame is None:
             idle += 1
+            # A decoder that stopped (camera unplugged) must show "no signal"
+            # instead of replaying the last frame forever as if it were live.
             if idle == 1 or idle % 40 == 0:
-                yield (
-                    f"--{BOUNDARY}\r\nContent-Type: image/jpeg\r\n\r\n".encode()
-                    + _placeholder_jpeg()
-                    + b"\r\n"
-                )
+                yield _mjpeg_part(_placeholder_jpeg())
             await asyncio.sleep(interval)
             continue
         idle = 0
         if frame is not last:
             last = frame
-            yield (
-                f"--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                f"{len(frame)}\r\n\r\n".encode()
-                + frame
-                + b"\r\n"
-            )
+            yield _mjpeg_part(frame)
         await asyncio.sleep(interval)
 
 
@@ -440,7 +446,13 @@ async def camera_live(
     )
 
 
+_PLACEHOLDER: bytes | None = None
+
+
 def _placeholder_jpeg() -> bytes:
+    global _PLACEHOLDER  # noqa: PLW0603 - one immutable image per process
+    if _PLACEHOLDER is not None:
+        return _PLACEHOLDER
     import io
 
     from PIL import Image, ImageDraw
@@ -450,7 +462,8 @@ def _placeholder_jpeg() -> bytes:
     draw.text((20, 20), "CAMERASMART - no signal", fill="#94a3b8")
     buffer = io.BytesIO()
     image.save(buffer, format="JPEG", quality=70)
-    return buffer.getvalue()
+    _PLACEHOLDER = buffer.getvalue()
+    return _PLACEHOLDER
 
 
 # --------------------------------------------------------------------------

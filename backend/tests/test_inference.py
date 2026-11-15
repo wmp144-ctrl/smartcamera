@@ -100,3 +100,43 @@ def test_cpu_only_jobs_need_no_device() -> None:
     assert done.wait(3.0)
     assert scheduler.stats()["detail"]["7"]["processed"] == 1
     scheduler.shutdown()
+
+
+def test_stats_survives_cameras_registering_concurrently() -> None:
+    """The dashboard polls /api/system/runtime while cameras start and stop.
+
+    Iterating the stats dict outside the lock used to raise
+    ``RuntimeError: dictionary changed size during iteration`` (HTTP 500).
+    """
+    scheduler = InferenceScheduler(queue_size=1)
+    stop = threading.Event()
+
+    def churn() -> None:
+        camera_id = 1000
+        while not stop.is_set():
+            scheduler.register(camera_id)
+            scheduler.unregister(camera_id)
+            camera_id += 1
+
+    thread = threading.Thread(target=churn, daemon=True)
+    thread.start()
+    try:
+        for _ in range(2000):
+            snapshot = scheduler.stats()
+            assert "pending" in snapshot
+            assert snapshot["cameras"] >= 0
+    finally:
+        stop.set()
+        thread.join(2.0)
+
+
+def test_a_stopped_camera_cannot_resurrect_its_slot() -> None:
+    """A frame already in flight must not bring a deleted camera back."""
+    scheduler = InferenceScheduler(queue_size=1)
+    scheduler.register(7)
+    scheduler.unregister(7)
+
+    assert scheduler.submit(7, lambda: None) is False
+    stats = scheduler.stats()
+    assert stats["cameras"] == 0
+    assert stats["pending"] == 0

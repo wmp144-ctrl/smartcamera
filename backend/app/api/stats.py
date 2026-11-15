@@ -6,7 +6,6 @@ from datetime import date, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import select
 
 from app.api.deps import SessionDep, TimeWindowDep
 from app.core.config import settings

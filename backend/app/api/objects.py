@@ -11,7 +11,7 @@ from app.api.deps import SessionDep, TimeWindowDep, clamp_page
 from app.models.camera import Camera
 from app.models.detection import DIRECTIONS, ObjectImage, TrackRecord
 from app.schemas.common import Message, Page
-from app.schemas.detection import ObjectImageRead, TrackDetail, TrackRead
+from app.schemas.detection import ObjectImageRead, TrackDetail
 from app.services.geometry import direction_label_fa
 from app.services.models_registry import class_label
 from app.services.search import build_details, load_images

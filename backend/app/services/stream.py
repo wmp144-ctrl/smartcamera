@@ -430,7 +430,12 @@ class FFmpegFrameReader:
     def read(self) -> np.ndarray | None:
         if self._process is None or self._process.stdout is None:
             return None
-        raw = _read_exact(self._process.stdout, self.frame_bytes)
+        try:
+            raw = _read_exact(self._process.stdout, self.frame_bytes)
+        except (ValueError, OSError):
+            # ``close()`` runs on another thread to unblock this read; a closed
+            # pipe raises instead of returning EOF on Windows.
+            return None
         if raw is None:
             self._report_exit()
             return None
@@ -507,6 +512,10 @@ class StreamHealth:
     latency_ms: float = 0.0
     jitter_ms: float = 0.0
     dropped_frames: int = 0
+    #: failed connection attempts (a camera that never opened); kept apart from
+    #: ``dropped_frames`` so the health chart does not call a network outage a
+    #: decode problem.
+    connect_failures: int = 0
     reconnect_count: int = 0
     last_frame_at: datetime | None = None
     message: str | None = None
@@ -522,6 +531,8 @@ class StreamHealth:
     inference_ms: float = 0.0
     #: Stored snapshots dropped because the writer queue was full.
     snapshot_dropped: int = 0
+    #: JPEGs encoded for live viewers (proves the encode follows the viewer rate)
+    live_encoded: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -534,6 +545,7 @@ class StreamHealth:
             "latency_ms": round(self.latency_ms, 1),
             "jitter_ms": round(self.jitter_ms, 1),
             "dropped_frames": self.dropped_frames,
+            "connect_failures": self.connect_failures,
             "reconnect_count": self.reconnect_count,
             "last_frame_at": self.last_frame_at.isoformat() if self.last_frame_at else None,
             "message": self.message,
@@ -541,6 +553,7 @@ class StreamHealth:
             "queue_wait_ms": round(self.queue_wait_ms, 1),
             "inference_ms": round(self.inference_ms, 1),
             "snapshot_dropped": self.snapshot_dropped,
+            "live_encoded": self.live_encoded,
         }
 
 
@@ -630,6 +643,8 @@ class CameraStream:
         self._lock = threading.Lock()
         self._last_frame: np.ndarray | None = None
         self._last_jpeg: bytes | None = None
+        #: ``time.monotonic()`` of the last encoded live JPEG (0 = none yet)
+        self._last_jpeg_at = 0.0
         self._overlay_cache: tuple[bytes, float] | None = None
         self._detections: list[OverlayBox] = []
         self._last_detect_at = 0.0
@@ -638,6 +653,13 @@ class CameraStream:
         self._detect_window: list[float] = []
         #: ``time.monotonic()`` of the last live-view poll (0 = nobody watching).
         self._live_plain_at = 0.0
+        #: JPEG rate the watching client asked for (0 = use ``live_max_fps``).
+        self._live_fps = 0.0
+        #: reader currently in use, so ``stop()`` can close its pipe and unblock
+        #: a decode thread sitting inside a socket read.
+        self._reader = None
+        #: successful sessions since ``start()`` (the first one is not a reconnect)
+        self._sessions = 0
         self._backoff = 1.0
         #: Encoded bitrate from the stream probe, when the container reports it.
         self._source_bitrate_kbps: float | None = None
@@ -676,6 +698,21 @@ class CameraStream:
         self._stop.set()
         thread = self._thread
         self._thread = None
+        reader = self._reader
+        if (
+            reader is not None
+            and thread is not None
+            and thread is not threading.current_thread()
+            and thread.is_alive()
+        ):
+            # A decode thread blocked inside ``reader.read()`` only notices the
+            # stop flag after the socket timeout (up to 8 s for RTSP). Closing
+            # the pipe makes that read return immediately, so a camera stops in
+            # milliseconds and a restart cannot race a second decoder.
+            try:
+                reader.close()
+            except Exception:  # noqa: BLE001 - teardown must never raise
+                logger.debug("camera %s: closing the reader failed", self.config.id, exc_info=True)
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
             if thread.is_alive() and thread not in self._orphan_threads:
@@ -714,26 +751,44 @@ class CameraStream:
             except Exception:  # noqa: BLE001
                 logger.exception("state change callback failed")
 
-    def latest_jpeg(self, *, encode_if_missing: bool = True) -> bytes | None:
+    def latest_jpeg(
+        self, *, encode_if_missing: bool = True, max_age: float | None = None
+    ) -> bytes | None:
         """Newest live JPEG.
 
         ``encode_if_missing=False`` is the MJPEG/server-push path: it returns
         ``None`` when the decode loop has not produced a frame (nobody is
         watching, so nothing is encoded) instead of encoding inside the API
         request. ``True`` is the on-demand path used by the snapshot button.
+
+        A cached frame older than ``max_age`` is **not** returned: when the
+        decoder stops (camera unplugged, ffmpeg died) the last JPEG used to be
+        replayed forever, so the UI showed a frozen "live" picture instead of
+        the no-signal placeholder.
         """
+        limit = LIVE_IDLE_GRACE_SECONDS if max_age is None else max_age
+        now = time.monotonic()
         with self._lock:
             cached = self._last_jpeg
+            cached_at = self._last_jpeg_at
             frame = self._last_frame
-        if cached is not None:
+        if cached is not None and (now - cached_at) <= limit:
             return cached
         if not encode_if_missing or frame is None:
             return None
         return self._encode_live(frame)
 
-    def mark_live_view(self) -> None:
-        """Tell the stream that a client is watching the raw live view."""
+    def mark_live_view(self, fps: float | None = None) -> None:
+        """Tell the stream that a client is watching the raw live view.
+
+        ``fps`` is the rate that client actually consumes. Encoding at the full
+        stream rate and then throttling only the HTTP delivery meant a 3 fps
+        grid tile still cost 20 JPEG encodes per second on the decode thread;
+        the decoder now encodes at the viewer's cadence.
+        """
         self._live_plain_at = time.monotonic()
+        if fps:
+            self._live_fps = max(1.0, min(float(fps), float(max(1, self.config.fps)) * 1.5))
 
     def latest_frame(self) -> np.ndarray | None:
         with self._lock:
@@ -862,7 +917,7 @@ class CameraStream:
             local_file = is_local_source(self.config.rtsp_url)
             if not reader.open():
                 attempts += 1
-                self.health.dropped_frames += 1
+                self.health.connect_failures += 1
                 if local_file:
                     # Retrying a path that does not exist never succeeds; say so
                     # instead of showing the camera as "reconnecting" forever.
@@ -883,7 +938,12 @@ class CameraStream:
             # 246 reconnects in a five minute outage, measured. It is reset
             # below, once a session actually produced frames.
             self._prev_read_at = None
-            self.health.reconnect_count += 1
+            self._sessions += 1
+            if self._sessions > 1:
+                # The first session is not a reconnect; counting it made a
+                # freshly booted camera show "reconnect 1" in the health panel.
+                self.health.reconnect_count += 1
+            self._reader = reader
             self._set_state("online", None)
             consecutive_failures = 0
             # A camera whose server accepts the RTSP session but has no stream
@@ -954,11 +1014,16 @@ class CameraStream:
                 if not reader.running:
                     break
 
+            self._reader = None
             reader.close()
             if self._stop.is_set():
                 break
             if session_frames == 0:
                 attempts += 1
+                # The session opened but never produced a picture (publisher
+                # gone, wrong stream path): from the operator's point of view
+                # that is a failed connection, so it is counted as one.
+                self.health.connect_failures += 1
                 self._set_state("reconnecting", "جریان تصویری روی این آدرس در دسترس نیست")
                 if max_retries and attempts > max_retries:
                     self._set_state("error", "تعداد تلاش‌های اتصال به پایان رسید")
@@ -997,15 +1062,26 @@ class CameraStream:
             return None
 
     def _publish_frame(self, frame: np.ndarray) -> None:
-        # Only encode while somebody is actually watching the raw live view:
-        # a full-frame JPEG costs ~9 ms, which is 18% of a core per camera at
-        # 20 fps — pure waste for a headless or closed browser tab.
-        watching = (time.monotonic() - self._live_plain_at) < LIVE_IDLE_GRACE_SECONDS
-        encoded = self._encode_live(frame) if watching else None
+        # Only encode while somebody is actually watching the raw live view, and
+        # only at the rate that viewer asked for: a full-frame JPEG costs ~9 ms,
+        # so encoding 20 of them per second for a 5 fps tile is pure waste.
+        now = time.monotonic()
+        watching = (now - self._live_plain_at) < LIVE_IDLE_GRACE_SECONDS
+        encoded = None
+        if watching:
+            fps = self._live_fps or float(settings.live_max_fps or self.config.fps)
+            interval = 1.0 / max(1.0, fps)
+            if (now - self._last_jpeg_at) >= interval:
+                encoded = self._encode_live(frame)
         with self._lock:
             self._last_frame = frame
-            self._last_jpeg = encoded
-            self._overlay_cache = None
+            if encoded is not None:
+                # A frame that was not encoded must not clear the cache: the
+                # MJPEG loop still needs the newest JPEG between two encodes.
+                self._last_jpeg = encoded
+                self._last_jpeg_at = now
+                self._overlay_cache = None
+                self.health.live_encoded += 1
 
     def _should_detect(self, now: float) -> bool:
         if not self.config.detection_enabled or self.pipeline is None:
@@ -1044,7 +1120,10 @@ class CameraStream:
         self.health.queue_wait_ms = scheduler.wait_ms(self.config.id)
 
         self.health.detections_total += len(result.detections)
-        self._record_rate(self._detect_window, now)
+        # Measure the detection rate when the frame was *analysed*, not when it
+        # was submitted: with a busy scheduler the queued timestamps arrive out
+        # of order and ``_rate`` then reported 0 fps for a working camera.
+        self._record_rate(self._detect_window, time.perf_counter())
         self.health.detection_fps = _rate(self._detect_window)
 
         boxes: list[OverlayBox] = []
@@ -1166,9 +1245,16 @@ def _rebuild_pipeline(stream: CameraStream, config: CameraRuntimeConfig) -> Dete
     pipeline.config = config.to_pipeline_config()
     pipeline.set_detector(detector)
     pipeline.rebuild_rules()
-    if previous is not None and previous is not detector:
-        # Swapped models: hand the old one back once the new one is in place.
-        detector_registry.release(previous)
+    if previous is not None:
+        if previous is detector:
+            # ``acquire`` took a second reference on the model this camera already
+            # used; give it straight back. Without this every settings save leaked
+            # one reference and the model could never be unloaded (reproduced:
+            # refs=3 after three rebuilds).
+            detector_registry.release(detector)
+        else:
+            # Swapped models: hand the old one back once the new one is in place.
+            detector_registry.release(previous)
     return pipeline
 
 

@@ -7,7 +7,7 @@ snapshots. Pillow only — no OpenCV dependency.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Sequence
 
 from PIL import Image, ImageDraw
 

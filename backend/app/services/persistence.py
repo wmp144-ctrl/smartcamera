@@ -11,7 +11,7 @@ import logging
 import queue
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -53,36 +53,70 @@ class SnapshotWriter:
         )
         self._workers = max(1, int(workers))
         self._capacity = max(1, int(capacity))
-        self._threads: list[threading.Thread] = []
+        #: serial -> thread. Serials are never reused, so a worker that retired
+        #: during a shrink can never be confused with a newly spawned one; the
+        #: list-of-threads version counted *retired* threads as active and a
+        #: ``resize(2)`` followed by ``resize(4)`` left the pool stuck at two
+        #: workers while reporting four (reproduced before this fix).
+        self._threads: dict[int, threading.Thread] = {}
+        self._next_serial = 0
+        self._closed = False
         self._submitted = 0
         self._done = 0
         self._dropped = 0
         self._errors = 0
         self._last_error: str | None = None
-        self._queued_at: list[float] = []
+        #: one timestamp per queued task; a deque so a resize that drops the
+        #: oldest tasks can drop their timestamps with them (a plain list drifted
+        #: out of sync and reported nonsense ``queue_wait_ms`` forever).
+        self._queued_at: deque[float] = deque()
         self._last_wait_ms = 0.0
-        for index in range(self._workers):
-            self._spawn(index)
+        for _ in range(self._workers):
+            self._spawn()
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     # -- workers -----------------------------------------------------------
-    def _spawn(self, index: int) -> None:
-        thread = threading.Thread(
-            target=self._work, args=(index,), name=f"snapshot-writer-{index}", daemon=True
-        )
-        thread.start()
-        self._threads.append(thread)
+    def _active(self) -> list[int]:
+        """Serials of workers that count towards ``workers`` and are alive."""
+        return [
+            serial
+            for serial, thread in self._threads.items()
+            if serial < self._workers and thread.is_alive()
+        ]
 
-    def _work(self, index: int) -> None:
+    def _spawn(self) -> None:
+        serial = self._next_serial
+        self._next_serial += 1
+        thread = threading.Thread(
+            target=self._work,
+            args=(serial,),
+            name=f"snapshot-writer-{serial}",
+            daemon=True,
+        )
+        self._threads[serial] = thread
+        thread.start()
+
+    def _retire(self, serial: int) -> None:
+        with self._lock:
+            self._threads.pop(serial, None)
+
+    def _work(self, serial: int) -> None:
         while True:
             with self._lock:
-                if index >= self._workers:
-                    return  # resized down: this worker retires
+                if self._closed or serial >= self._workers:
+                    # resized down (or shutting down): this worker retires
+                    self._threads.pop(serial, None)
+                    return
                 pending = self._queue
             try:
                 task = pending.get(timeout=0.3)
             except queue.Empty:
                 continue
             if task is None:
+                self._retire(serial)
                 return
             started = time.monotonic()
             try:
@@ -96,12 +130,14 @@ class SnapshotWriter:
                 with self._lock:
                     self._done += 1
                     if self._queued_at:
-                        self._last_wait_ms = (started - self._queued_at.pop(0)) * 1000.0
+                        self._last_wait_ms = (started - self._queued_at.popleft()) * 1000.0
 
     # -- api ---------------------------------------------------------------
     def submit(self, task: Callable[[], Any]) -> bool:
         """Queue work; ``False`` means the queue was full and it was dropped."""
         with self._lock:
+            if self._closed:
+                return False
             self._submitted += 1
             try:
                 self._queue.put_nowait(task)
@@ -135,18 +171,25 @@ class SnapshotWriter:
                 # Oldest pending frames are the ones an operator least needs.
                 preserved = preserved[overflow:]
                 self._dropped += overflow
+                for _ in range(overflow):
+                    if self._queued_at:
+                        self._queued_at.popleft()
             self._capacity = capacity
             self._queue = queue.Queue(maxsize=capacity)
             for item in preserved:
                 self._queue.put_nowait(item)
             self._workers = workers
-            while len(self._threads) < workers:
-                self._spawn(len(self._threads))
+            self._threads = {
+                serial: thread for serial, thread in self._threads.items() if thread.is_alive()
+            }
+            while len(self._active()) < workers:
+                self._spawn()
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
             return {
-                "workers": self._workers,
+                "workers": len(self._active()),
+                "workers_configured": self._workers,
                 "capacity": self._capacity,
                 "queued": self._queue.qsize(),
                 "submitted": self._submitted,
@@ -157,16 +200,25 @@ class SnapshotWriter:
                 "queue_wait_ms": round(self._last_wait_ms, 1),
             }
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout: float = 2.0) -> None:
+        """Stop every worker and drop whatever is still queued.
+
+        Called from ``CameraManager.stop()``: without it a restart discarded the
+        snapshots already encoded and waiting on disk, silently losing evidence.
+        """
         with self._lock:
-            for _ in self._threads:
+            self._closed = True
+            for _ in list(self._threads.values()):
                 try:
                     self._queue.put_nowait(None)
                 except queue.Full:
                     break
-        for thread in self._threads:
-            thread.join(timeout=2.0)
-        self._threads.clear()
+            threads = list(self._threads.values())
+        for thread in threads:
+            thread.join(timeout=timeout)
+        with self._lock:
+            self._threads.clear()
+            self._queued_at.clear()
 
 
 _writer: SnapshotWriter | None = None
@@ -177,7 +229,9 @@ def snapshot_writer() -> SnapshotWriter:
     """Process-wide writer, created from the current performance profile."""
     global _writer  # noqa: PLW0603 - one writer per process
     with _writer_lock:
-        if _writer is None:
+        # A shutdown writer stays in the module global; reusing it would accept
+        # work that no thread will ever run, so a later start() gets a fresh one.
+        if _writer is None or _writer.closed:
             _writer = SnapshotWriter(
                 workers=settings.snapshot_workers,
                 capacity=settings.snapshot_queue_size,

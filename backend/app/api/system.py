@@ -263,6 +263,10 @@ async def put_performance(payload: dict = Body(...)) -> dict:
     if reload_needed and manager.running:
         for camera_id in list(manager.stream_ids()):
             await manager.reload_camera(camera_id)
+        # The registry keeps the model of the *previous* device alive until the
+        # last camera releases it; return the freed blocks to the driver so a
+        # 4 GB card does not sit at "almost full" after the switch.
+        await asyncio.to_thread(_release_cached_vram)
 
     changed = {k: v for k, v in clean.items() if previous.get(k) != v}
     logger.info("performance profile updated: %s", changed or clean)
@@ -297,6 +301,17 @@ async def storage() -> StorageUsage:
 
 
 # --------------------------------------------------------------------------
+def _release_cached_vram() -> None:
+    """Best-effort ``torch.cuda.empty_cache`` for the period after a reload."""
+    try:
+        import torch  # noqa: PLC0415
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 - telemetry/setup must never raise
+        pass
+
+
 def _safe_database_url(url: str) -> str:
     """Hide credentials before returning the URL to the UI."""
     if "@" not in url:

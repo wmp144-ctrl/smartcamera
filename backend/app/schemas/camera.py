@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.security import has_url_credentials, mask_url_credentials
-from app.models.camera import DEFAULT_CLASS_CONFIG, DEFAULT_RECONNECT_POLICY
+from app.models.camera import DEFAULT_CLASS_CONFIG
 from app.schemas.common import ORMModel
 
 ZoneKind = Literal["region", "ignore", "line", "alert"]
