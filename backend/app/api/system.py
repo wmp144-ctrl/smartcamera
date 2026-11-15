@@ -256,6 +256,10 @@ async def put_performance(payload: dict = Body(...)) -> dict:
         setattr(profile, key, value)
     save_profile(profile)
     apply_profile(profile)
+    # Global knobs (detection width, motion requirement) are copied into each
+    # pipeline when it is built; without this the change only reached cameras
+    # created afterwards.
+    manager.apply_performance()
 
     # A device/precision change only takes effect for models loaded after it, so
     # every detecting camera is reloaded (the registry reloads the weights).

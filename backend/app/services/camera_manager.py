@@ -385,6 +385,24 @@ class CameraManager:
         self._detector_errors.clear()
         self.heatmap.clear()
 
+    def apply_performance(self) -> None:
+        """Push process-wide performance settings into the running pipelines.
+
+        ``detection_max_width`` (and the other values read from ``settings``) is
+        copied into each ``PipelineConfig`` when a camera starts, so before this
+        the Settings page saved a new width and nothing changed until the camera
+        was re-saved. Per-camera values (stream/detection fps) stay in the DB row
+        and are still applied through ``reload_camera``.
+        """
+        for stream in list(self._streams.values()):
+            pipeline = stream.pipeline
+            if pipeline is None:
+                continue
+            try:
+                pipeline.update_config(stream.config.to_pipeline_config())
+            except Exception:  # noqa: BLE001 - a broken pipeline must not stop the others
+                logger.exception("could not apply performance settings to camera %s", stream.config.id)
+
     def refresh_metadata(self, camera: Camera) -> bool:
         """Apply display-only changes (name) without restarting the stream."""
         config = self._configs.get(camera.id)

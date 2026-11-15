@@ -80,14 +80,26 @@ class SnapshotWriter:
 
     # -- workers -----------------------------------------------------------
     def _active(self) -> list[int]:
-        """Serials of workers that count towards ``workers`` and are alive."""
-        return [
-            serial
-            for serial, thread in self._threads.items()
-            if serial < self._workers and thread.is_alive()
-        ]
+        """Serials of the workers that are alive right now."""
+        return [serial for serial, thread in self._threads.items() if thread.is_alive()]
 
-    def _spawn(self) -> None:
+    def _is_excess(self, serial: int) -> bool:
+        """Whether this worker is one of the extras left by a shrink.
+
+        Retirement used to compare ``serial >= self._workers``, which assumed
+        serials stayed dense from zero. They do not: after 2 -> 4 -> 2 -> 4 the
+        new serial is 4 while ``workers`` is also 4, so every freshly spawned
+        worker retired immediately and ``resize`` spawned another one forever
+        (measured: 13 744 threads until ``can't start new thread``).
+        """
+        alive = sorted(self._active())
+        if len(alive) <= self._workers:
+            return False
+        # Keep the oldest workers, retire the highest serials (they are the ones
+        # most likely to be idle, never a thread that was just spawned).
+        return serial in alive[self._workers:]
+
+    def _spawn(self) -> bool:
         serial = self._next_serial
         self._next_serial += 1
         thread = threading.Thread(
@@ -97,7 +109,15 @@ class SnapshotWriter:
             daemon=True,
         )
         self._threads[serial] = thread
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError as exc:  # thread exhaustion: never loop on it
+            self._threads.pop(serial, None)
+            self._errors += 1
+            self._last_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("could not start a snapshot worker: %s", exc)
+            return False
+        return True
 
     def _retire(self, serial: int) -> None:
         with self._lock:
@@ -106,7 +126,7 @@ class SnapshotWriter:
     def _work(self, serial: int) -> None:
         while True:
             with self._lock:
-                if self._closed or serial >= self._workers:
+                if self._closed or self._is_excess(serial):
                     # resized down (or shutting down): this worker retires
                     self._threads.pop(serial, None)
                     return
@@ -182,8 +202,14 @@ class SnapshotWriter:
             self._threads = {
                 serial: thread for serial, thread in self._threads.items() if thread.is_alive()
             }
-            while len(self._active()) < workers:
-                self._spawn()
+            # Bounded: ``_spawn`` reports failure instead of retrying forever.
+            for _ in range(workers):
+                if len(self._active()) >= workers:
+                    break
+                if not self._spawn():
+                    break
+            # Workers that are now excess notice ``_is_excess`` on their next
+            # loop iteration and remove themselves.
 
     def stats(self) -> dict[str, Any]:
         with self._lock:

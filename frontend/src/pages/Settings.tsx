@@ -546,8 +546,10 @@ export function SettingsPage() {
 
             <div className="grid gap-3 md:grid-cols-2">
               {[
-                ["stream_fps", "نرخ دریافت (fps)"],
-                ["detection_fps", "نرخ تشخیص (fps)"],
+                // These two are the defaults for a *new* camera: the running
+                // ones keep their own value from the camera page.
+                ["stream_fps", "پیش‌فرض نرخ دریافت دوربین جدید (fps)"],
+                ["detection_fps", "پیش‌فرض نرخ تشخیص دوربین جدید (fps)"],
                 ["detection_max_width", "عرض ورودی مدل (0 = بدون تغییر)"],
                 ["inference_queue_size", "ظرفیت صف استنتاج هر دوربین"],
                 ["snapshot_workers", "Worker نوشتن تصاویر"],

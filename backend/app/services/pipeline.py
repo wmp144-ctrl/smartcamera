@@ -281,6 +281,17 @@ class DetectionPipeline:
     def set_detector(self, detector: Detector | None) -> None:
         self.detector = detector
 
+    def update_config(self, config: PipelineConfig) -> None:
+        """Apply a global settings change without rebuilding the pipeline.
+
+        ``detection_max_width`` (and the other process-wide knobs) live in
+        ``settings`` but were captured into each pipeline when it was built, so
+        changing the performance profile left every *running* camera on the old
+        value until an operator re-saved that camera.
+        """
+        self.config = config
+        self.rebuild_rules()
+
     def reset(self) -> None:
         self.tracker.reset()
         self.motion.reset()

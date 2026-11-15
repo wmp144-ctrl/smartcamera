@@ -15,9 +15,18 @@ import pytest
 
 from app.services import performance
 from app.services.detector import FakeDetector, parse_raw_output
-from app.services.inference import scheduler
+from app.services.inference import InferenceScheduler, scheduler
 from app.services.pipeline import DetectionPipeline, PipelineConfig
 from app.services.stream import CameraRuntimeConfig, CameraStream
+
+
+def wait_for(predicate, timeout: float = 3.0, interval: float = 0.01) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return False
 
 
 def make_config(**overrides) -> CameraRuntimeConfig:
@@ -232,6 +241,10 @@ def test_snapshot_writer_survives_repeated_resizes() -> None:
                 time.sleep(0.02)
             assert stats["workers"] == target, stats
             assert stats["workers_configured"] == target, stats
+        # Regression: retirement compared the serial with ``workers``, so after
+        # a few cycles every new worker retired instantly and ``resize`` spawned
+        # replacements until the OS refused (13 744 threads measured).
+        assert writer._next_serial <= 2 + 2 * 3 + 4, writer._next_serial
     finally:
         writer.shutdown()
 
@@ -260,6 +273,158 @@ def test_unusual_frame_sizes_do_not_break_the_pipeline(shape) -> None:  # noqa: 
     scaled = fit_width(frame_data, 0)
     assert scaled.shape == frame_data.shape
 
+
+# --------------------------------------------------------------------------
+# 7. Claims from the second review: scheduler races, queues, dispatcher, config
+# --------------------------------------------------------------------------
+def test_a_claimed_job_keeps_the_camera_busy() -> None:
+    """There is a window between ``_next_job`` and setting ``_current``.
+
+    Inside it ``wait_camera_idle`` used to answer "idle" for a camera whose job
+    had already been taken off the queue, so ``stop()`` released the pipeline
+    one instruction before that job entered it.
+    """
+    sched = InferenceScheduler()
+    try:
+        sched.register(91)
+        assert sched.submit(91, lambda: None)
+        claimed = sched._next_job()
+        assert claimed is not None
+        assert sched.wait_camera_idle(91, timeout=0.05) is False
+    finally:
+        sched.shutdown()
+
+
+def test_a_claimed_job_of_an_unregistered_camera_is_not_run() -> None:
+    sched = InferenceScheduler()
+    try:
+        sched.register(92)
+        assert sched.submit(92, lambda: None)
+        assert sched._next_job() is not None
+        sched.unregister(92)
+        assert sched._claim_is_valid(92) is False
+    finally:
+        sched.shutdown()
+
+
+def test_shutdown_timeout_does_not_start_a_second_dispatcher() -> None:
+    """A dispatcher that outlives its join must not be revived by a new start."""
+    sched = InferenceScheduler(name="dispatcher-probe")
+    gate = threading.Event()
+    started = threading.Event()
+
+    def stuck() -> None:
+        started.set()
+        gate.wait(5.0)
+
+    try:
+        sched.register(93)
+        assert sched.submit(93, stuck)
+        assert started.wait(2.0)
+        sched.shutdown(timeout=0.1)
+        # Work submitted after a shutdown that could not join the stuck job must
+        # still be processed, by exactly one dispatcher.
+        for _ in range(3):
+            sched.submit(93, lambda: None)
+        # ``queue_size`` is 1 here, so the three submits collapse into one job
+        # plus two drops: the point is that the queue is served at all.
+        assert wait_for(lambda: sched.stats()["processed"] >= 1, timeout=3.0)
+        # The old thread keeps its own (already set) stop event: once its job
+        # returns it exits instead of sharing the queue with the new one.
+        assert sched._stale, "the stuck dispatcher should be remembered"
+        gate.set()
+        assert wait_for(
+            lambda: not [t for t in threading.enumerate() if t.name == "dispatcher-probe" and t.is_alive() and t is not sched._thread],
+            timeout=4.0,
+        ), "a second dispatcher survived the stuck job"
+        alive = [t for t in threading.enumerate() if t.name == "dispatcher-probe" and t.is_alive()]
+        assert len(alive) == 1
+    finally:
+        gate.set()
+        sched.shutdown()
+
+
+def test_a_multi_frame_queue_runs_the_newest_frame() -> None:
+    """With ``inference_queue_size > 1`` the older waiting frame must be dropped."""
+    sched = InferenceScheduler()
+    try:
+        sched.set_queue_size(2)
+        sched.register(94)
+        assert sched.submit(94, lambda: None)   # oldest
+        assert sched.submit(94, lambda: None)   # newest
+        claimed = sched._next_job()
+        assert claimed is not None
+        # Only the newest frame may remain: the older one was dropped.
+        assert sched.pending() == 0
+        assert sched.stats()["detail"]["94"]["dropped"] == 1
+    finally:
+        sched.shutdown()
+
+
+def test_live_pipelines_receive_a_new_detection_width() -> None:
+    """A performance change must reach cameras that are already running."""
+    from app.services import performance as perf
+    from app.services.camera_manager import CameraManager
+
+    manager = CameraManager()
+    config = make_config(detection_enabled=True)
+    pipeline = DetectionPipeline(
+        config.to_pipeline_config(), FakeDetector(lambda _f, _i: [])
+    )
+    stream = CameraStream(config, pipeline=pipeline)
+    manager._streams[config.id] = stream  # noqa: SLF001 - test seam
+    settings_before = perf.settings.detection_max_width
+    try:
+        perf.settings.detection_max_width = 640
+        manager.apply_performance()
+        assert pipeline.config.detection_max_width == 640
+        # Per-camera values must survive: the profile only holds defaults.
+        assert stream.config.detection_fps == 5.0
+        assert stream.config.fps == 20
+    finally:
+        perf.settings.detection_max_width = settings_before
+
+
+def test_downscale_keeps_the_exact_width_without_opencv(monkeypatch) -> None:
+    """The stride fallback must not turn a 1280 limit into 960 px again."""
+    import builtins
+    import sys
+
+    from app.services import imaging
+
+    real_import = builtins.__import__
+
+    def no_cv2(name, *args, **kwargs):  # noqa: ANN001
+        if name == "cv2":
+            raise ImportError("no cv2 in this environment")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setitem(sys.modules, "cv2", None)
+    monkeypatch.setattr(builtins, "__import__", no_cv2)
+    wide = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    scaled = imaging.fit_width(wide, 1280)
+    assert scaled.shape[1] == 1280
+    assert scaled.shape[0] == 720
+
+
+@pytest.mark.parametrize("flags", ["readonly", "noncontiguous"])
+def test_pipeline_accepts_awkward_numpy_arrays(flags) -> None:  # noqa: ANN001
+    """Read-only and non-contiguous frames are normal from ffmpeg/PIL paths."""
+    base = np.zeros((720, 2560, 3), dtype=np.uint8)
+    frame_data = base[:, ::2] if flags == "noncontiguous" else np.zeros((720, 1280, 3), np.uint8)
+    frame_data.setflags(write=(flags != "readonly"))
+
+    pipeline = DetectionPipeline(
+        PipelineConfig(camera_id=1, require_motion=False),
+        FakeDetector(lambda _f, _i: []),
+    )
+    pipeline.process(frame_data)
+
+    stream = CameraStream(make_config(), reader_factory=lambda _cfg: None)
+    stream.mark_live_view(20)
+    stream._publish_frame(frame_data)
+    assert wait_for(lambda: stream.latest_jpeg(encode_if_missing=False) is not None)
+    stream.stop()
 
 # --------------------------------------------------------------------------
 # 6. The scheduler survives shutdown and restart

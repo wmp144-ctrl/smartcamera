@@ -13,12 +13,19 @@ def test_round_robin_gives_every_camera_a_turn() -> None:
     scheduler = InferenceScheduler(queue_size=4, name="test-rr")
     order: list[str] = []
     gate = threading.Event()
+    started = threading.Event()
 
     def blocked() -> None:
+        started.set()
         gate.wait(2.0)
 
-    # Camera 1 occupies the thread, camera 2 and 3 queue behind it.
+    # Camera 1 occupies the thread, camera 2 and 3 queue behind it. Waiting for
+    # ``started`` keeps the setup deterministic: without it camera 1's second
+    # frame could be submitted before the first one was picked up, and the
+    # newest-first slot would then run it first (that is by design for frames of
+    # one camera, but it is not what this fairness test is about).
     scheduler.submit(1, blocked)
+    assert started.wait(2.0)
     scheduler.submit(2, lambda: order.append("c2"))
     scheduler.submit(3, lambda: order.append("c3"))
     scheduler.submit(1, lambda: order.append("c1"))

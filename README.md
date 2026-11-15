@@ -984,6 +984,47 @@ RAM بدون رشد پیوسته، VRAM ثابت.
 - VRAM در طول soak نمونه‌برداری نشد (فقط `/api/system/gpu` موجود است).
 - اولین ساخت دوربینِ تشخیص‌دار روی مدل سرد ۴۱–۵۴ ثانیه طول کشید (لود+Trace مدل)؛ درخواست‌های بعدی ۰.۰–۰.۱ ثانیه بودند.
 
+## ۲۰. دور نهم: اعتبارسنجی گزارش دوم (Scheduler، Queue، Dispose)
+
+این دور یک گزارش مشکوک دیگر را مورد به مورد با کد مقایسه کرد. شش مورد تأیید و پنج مورد رد شد؛ یک باگ جدی هم خارج از گزارش پیدا شد.
+
+### ۲۰.۱. نتایج اعتبارسنجی
+
+| # | ادعا | نتیجه | شواهد |
+|---|---|---|---|
+| ۱ | Race بین `_next_job`، `_current` و `wait_camera_idle` | **تأییدشده** | `_next_job` قفل را قبل از `_current` آزاد می‌کرد؛ تست `test_a_claimed_job_keeps_the_camera_busy` روی کد قبلی `True` برگرداند (یعنی «آزاد») در حالی که Job گرفته شده بود |
+| ۲ | اجرای Job دوربین پس از `unregister` | **تأییدشده** | همان پنجره؛ Job گرفته‌شده بدون بررسی `_removed` اجرا می‌شد |
+| ۳ | آزادسازی Pipeline/مدل در حین Inference | **مشروط** | `stop()` در دور قبل drain شد؛ پنجرهٔ بند ۱ باقی مانده بود که با claim بسته شد |
+| ۴ | Timeout در `shutdown` و Dispatcher دوم | **تأییدشده** | `shutdown(timeout=0.1)` رشتهٔ گیرکرده را رها می‌کرد و `_ensure_thread` با `_stop.clear()` رشتهٔ قدیمی را زنده و رشتهٔ دوم را هم شروع می‌کرد؛ تست: `2 dispatchers are running` |
+| ۵ | پردازش فریم قدیمی در صف چندفریمی | **تأییدشده** | با `queue_size=2`، `popleft()` فریم قدیمی را اول اجرا می‌کرد؛ ضمناً `submit` برای فریم دومِ در صف `False` برمی‌گرداند (Drop کاذب) |
+| ۶ | سریالی شدن Motion+Tracking+Inference | **ردشده** | اندازه‌گیری: سربارهٔ Motion+Tracker فقط **۲.۳–۳.۰ms** در 720p در مقابل ۷۰ms تشخیص؛ گلوگاه GPU است، نه سریال‌سازی |
+| ۷ | آرایهٔ NumPy غیرقابل‌نوشتن / `ascontiguousarray` | **ردشده** | `pipeline.process` روی فریم read-only ۲.۴–۳.۱ms و non-contiguous ۵.۷–۶.۳ms، بدون خطا؛ تست اضافه شد |
+| ۸ | اعمال نشدن تنظیمات عملکرد روی دوربین فعال | **تأییدشده (جزئی)** | `detection_max_width` در `PipelineConfig` کش می‌شد و تا reload اثر نداشت. اما `stream_fps`/`detection_fps` واقعاً ستون هر دوربین‌اند؛ فقط برچسب UI گمراه‌کننده بود |
+| ۹ | غیرفعال بودن Resize در پیش‌فرض (`detection_max_width=0`) | **ردشده** | RF-DETR خودش به resolution داخلی مدل (384/512/560) تغییر اندازه می‌دهد؛ پیش‌فرض ۰ عمدی و درست است |
+| ۱۰ | روش جایگزین Stride | **تأییدشده** | fallback بدون OpenCV: ۱۹۲۰ با سقف ۱۲۸۰ → ۹۶۰ |
+| ۱۱ | ناکافی بودن تست‌های Threading/Shutdown/Race | **تأییدشده (جزئی)** | ۱۰ تست جدید برای همین موارد؛ مجموع تست‌های hardening به ۲۳ رسید |
+| ۱۲ | باگ‌های دیگر | **تأییدشده** | طوفان رشته در `SnapshotWriter.resize` (پایین) |
+
+### ۲۰.۲. باگ جدی خارج از گزارش: طوفان رشته در `SnapshotWriter.resize`
+
+`_work` بازنشستگی را با `serial >= self._workers` می‌سنجید؛ یعنی فرض می‌کرد serial‌ها از صفر پیوسته‌اند. بعد از چرخهٔ ۲→۴→۲→۴ serial جدید ۴ و `workers` هم ۴ می‌شد، پس هر Worker تازه بلافاصله بازنشسته می‌شد و `resize` تا بی‌نهایت Worker جدید می‌ساخت. اندازه‌گیری واقعی: **۱۳٬۷۴۴ رشته** تا خطای `can't start new thread`، و سپس `RuntimeError: cannot join thread before it is started` در `shutdown`.
+
+اصلاح: بازنشستگی بر اساس «تعداد زنده‌ها منهای تعداد پیکربندی‌شده» (`_is_excess`)، ساخت Worker در حلقهٔ محدود، و محافظت `_spawn` در برابر خطای ساخت رشته.
+
+### ۲۰.۳. اصلاحات این دور
+
+- `inference.py`: فیلد `_inflight` (claim داخل `_next_job`)، `_claim_is_valid()` برایJobهای دوربین حذف‌شده، `stop` مخصوص هر dispatcher (جلوگیری از زنده‌شدن مجدد)، `_stale` برای رشته‌های جا‌مانده، قفل `RLock` مشترک با Condition (رفع deadlock ترتیب قفل)، صف LIFO (جدیدترین فریم) و شمارش درست Drop، `submit` که «در صف» را Drop گزارش نمی‌کند.
+- `persistence.py`: `_is_excess`، `_spawn` ایمن، حلقهٔ محدود در `resize`.
+- `pipeline.py`: `update_config()` برای اعمال تنظیمات سراسری روی Pipeline زنده.
+- `camera_manager.py`: `apply_performance()`؛ `api/system.py` آن را بعد از هر ذخیرهٔ پروفایل صدا می‌زند.
+- `imaging.py`: fallback با Pillow (عرض دقیق) به‌جای stride.
+- `frontend/src/pages/Settings.tsx`: برچسب `stream_fps`/`detection_fps` به «پیش‌فرض دوربین جدید» تغییر کرد (رفتار قبلی همین بود).
+- تست‌ها: `tests/test_hardening.py` (+۱۰ تست) و `tests/test_inference.py` (تست round-robin قطعی شد).
+
+### ۲۰.۴. نتیجهٔ تست
+
+**۳۸۶ تست، ۲ skip، ۰ خطا** (دو اجرای کامل پیاپی)؛ `ruff --select F,E9` تمیز؛ `tsc --noEmit` موفق.
+
 === پایان نصب ===
 اجرا با دوبار کلیک روی start_camerasmart.bat
 سپس در مرورگر: http://127.0.0.1:8000

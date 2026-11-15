@@ -12,6 +12,7 @@ frame, which is exactly what a detector is looking for).
 from __future__ import annotations
 
 import logging
+import math
 
 import numpy as np
 
@@ -38,8 +39,20 @@ def fit_width(array: np.ndarray, max_width: int) -> np.ndarray:
         resized = cv2.resize(
             array, (int(max_width), target_height), interpolation=cv2.INTER_AREA
         )
-    except Exception:  # noqa: BLE001 - no OpenCV: fall back to a stride
-        step = max(1, round(width / max_width))
-        resized = array[::step, ::step]
-        logger.debug("cv2 unavailable; downscaled with a stride of %d", step)
+    except Exception:  # noqa: BLE001 - no OpenCV: fall back to Pillow
+        # A stride fallback reintroduced the very bug this module exists for
+        # (1920 px with a 1280 limit became 960 px) and aliased thin objects
+        # away; Pillow is already a hard dependency, so use it for an exact,
+        # aspect-preserving resize instead.
+        try:
+            from PIL import Image  # noqa: PLC0415
+
+            image = Image.fromarray(array)
+            resized = np.asarray(
+                image.resize((int(max_width), target_height), Image.BILINEAR)
+            )
+        except Exception:  # noqa: BLE001 - last resort: nearest-neighbour stride
+            step = max(1, math.ceil(width / max_width))
+            resized = array[::step, ::step]
+            logger.debug("no cv2/Pillow; downscaled with a stride of %d", step)
     return np.ascontiguousarray(resized)
